@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Acoustic Speech Monitor</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --card-bg: #16213e;
+    --text: #e0e0e0;
+    --text-dim: #8a8a9a;
+    --green: #00c853;
+    --yellow: #ffd600;
+    --red: #ff1744;
+    --reverb-color: #ffd600;
+    --noise-color: #ff1744;
+    --articulation-color: #ff9100;
+    --distance-color: #448aff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1.5rem;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-bottom: 1.5rem;
+    letter-spacing: 0.05em;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.2rem;
+    max-width: 720px;
+    width: 100%;
+  }
+  .card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.2rem;
+  }
+  .card-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.6rem;
+  }
+
+  /* Intelligibility ring — spans both columns */
+  .ring-container {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem;
+  }
+  .ring-wrap {
+    position: relative;
+    width: 200px;
+    height: 200px;
+  }
+  .ring-wrap svg { width: 100%; height: 100%; }
+  .ring-bg { fill: none; stroke: #2a2a4a; stroke-width: 12; }
+  .ring-fg {
+    fill: none;
+    stroke: var(--green);
+    stroke-width: 12;
+    stroke-linecap: round;
+    stroke-dasharray: 502;
+    stroke-dashoffset: 502;
+    transform: rotate(-90deg);
+    transform-origin: center;
+    transition: stroke-dashoffset 0.4s ease, stroke 0.4s ease;
+  }
+  .ring-label {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+  }
+  .ring-value {
+    font-size: 2.4rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ring-unit {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  .ring-status {
+    font-size: 0.85rem;
+    margin-top: 0.8rem;
+    color: var(--text-dim);
+  }
+
+  /* Room profile card */
+  .room-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .stat { font-size: 0.85rem; }
+  .stat-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .room-type-badge {
+    display: inline-block;
+    margin-top: 0.6rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    background: #2a2a4a;
+    font-size: 0.8rem;
+  }
+
+  /* Cause card */
+  .cause-card { min-height: 100px; }
+  .cause-inactive { color: var(--text-dim); font-size: 0.85rem; }
+  .cause-name {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 0.3rem;
+  }
+  .cause-action {
+    font-size: 0.95rem;
+    color: var(--text);
+  }
+
+  /* Haptic preview */
+  .haptic-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 60px;
+    margin-top: 0.5rem;
+  }
+  .haptic-bar {
+    background: var(--green);
+    border-radius: 2px;
+    min-width: 4px;
+    transition: height 0.3s, background 0.3s;
+  }
+
+  /* Connection status */
+  .conn-status {
+    margin-top: 1rem;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  .conn-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .conn-dot.connected { background: var(--green); }
+  .conn-dot.disconnected { background: var(--red); }
+</style>
+</head>
+<body>
+  <h1>Acoustic Speech Monitor</h1>
+
+  <div class="grid">
+    <!-- Intelligibility Ring -->
+    <div class="card ring-container">
+      <div class="card-label">了解度 Intelligibility</div>
+      <div class="ring-wrap">
+        <svg viewBox="0 0 180 180">
+          <circle class="ring-bg" cx="90" cy="90" r="80"/>
+          <circle class="ring-fg" id="ring" cx="90" cy="90" r="80"/>
+        </svg>
+        <div class="ring-label">
+          <div class="ring-value" id="ring-value">--</div>
+          <div class="ring-unit">SRMR ratio</div>
+        </div>
+      </div>
+      <div class="ring-status" id="ring-status">待機中...</div>
+    </div>
+
+    <!-- Room Profile -->
+    <div class="card">
+      <div class="card-label">室内プロファイル</div>
+      <div class="room-stats">
+        <div class="stat">
+          <div class="stat-value" id="rt60">--</div>
+          <div>RT60 (s)</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="noise-floor">--</div>
+          <div>ノイズフロア (dB)</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="drr">--</div>
+          <div>DRR (dB)</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="srmr-target">--</div>
+          <div>SRMR目標</div>
+        </div>
+      </div>
+      <div class="room-type-badge" id="room-type">--</div>
+    </div>
+
+    <!-- Cause Card -->
+    <div class="card cause-card">
+      <div class="card-label">原因分析</div>
+      <div id="cause-content">
+        <div class="cause-inactive">了解度が低下した場合に原因を表示</div>
+      </div>
+    </div>
+
+    <!-- Haptic Preview -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <div class="card-label">触覚パターンプレビュー</div>
+      <div class="haptic-bars" id="haptic-bars"></div>
+      <div style="margin-top: 0.4rem; font-size: 0.8rem; color: var(--text-dim);" id="haptic-name">--</div>
+    </div>
+  </div>
+
+  <div class="conn-status">
+    <span class="conn-dot disconnected" id="conn-dot"></span>
+    <span id="conn-text">接続中...</span>
+  </div>
+
+<script>
+const CIRCUMFERENCE = 2 * Math.PI * 80; // ring radius=80
+const causeColors = {
+  reverb: 'var(--reverb-color)',
+  noise: 'var(--noise-color)',
+  articulation: 'var(--articulation-color)',
+  distance: 'var(--distance-color)',
+};
+
+function updateRing(ratio) {
+  const ring = document.getElementById('ring');
+  const val = document.getElementById('ring-value');
+  const status = document.getElementById('ring-status');
+
+  const clamped = Math.max(0, Math.min(ratio, 1.5));
+  const offset = CIRCUMFERENCE * (1 - Math.min(clamped, 1));
+  ring.style.strokeDasharray = CIRCUMFERENCE;
+  ring.style.strokeDashoffset = offset;
+
+  val.textContent = ratio.toFixed(2);
+
+  if (ratio >= 0.8) {
+    ring.style.stroke = 'var(--green)';
+    status.textContent = '了解度: 良好';
+    status.style.color = 'var(--green)';
+  } else if (ratio >= 0.5) {
+    ring.style.stroke = 'var(--yellow)';
+    status.textContent = '了解度: 注意';
+    status.style.color = 'var(--yellow)';
+  } else {
+    ring.style.stroke = 'var(--red)';
+    status.textContent = '了解度: 低下';
+    status.style.color = 'var(--red)';
+  }
+}
+
+function updateRoomProfile(data) {
+  if (!data.room_profile) return;
+  const rp = data.room_profile;
+  document.getElementById('rt60').textContent = rp.rt60.toFixed(2);
+  document.getElementById('noise-floor').textContent = rp.noise_floor_db.toFixed(1);
+  document.getElementById('drr').textContent = rp.drr_db.toFixed(1);
+  document.getElementById('srmr-target').textContent = rp.srmr_target.toFixed(1);
+  document.getElementById('room-type').textContent = rp.room_type;
+}
+
+function updateCause(data) {
+  const el = document.getElementById('cause-content');
+  if (!data.primary_cause) {
+    el.innerHTML = '<div class="cause-inactive">了解度が低下した場合に原因を表示</div>';
+    return;
+  }
+  const c = data.primary_cause;
+  const color = causeColors[c.cause] || 'var(--text)';
+  el.innerHTML = `
+    <div class="cause-name" style="color: ${color}">${c.cause.toUpperCase()}</div>
+    <div class="cause-action">${c.action || ''}</div>
+    <div style="margin-top:0.4rem;font-size:0.8rem;color:var(--text-dim)">
+      severity: ${(c.severity * 100).toFixed(0)}%
+    </div>
+  `;
+}
+
+function updateHaptic(data) {
+  const container = document.getElementById('haptic-bars');
+  const nameEl = document.getElementById('haptic-name');
+  if (!data.haptic_pattern) {
+    container.innerHTML = '';
+    nameEl.textContent = '--';
+    return;
+  }
+  const p = data.haptic_pattern;
+  nameEl.textContent = p.name || '--';
+  const color = data.primary_cause ? (causeColors[data.primary_cause.cause] || 'var(--green)') : 'var(--green)';
+  const maxDur = Math.max(...p.sequence.map(s => s.duration_ms), 1);
+  container.innerHTML = p.sequence.map(s => {
+    const h = Math.max(2, s.intensity * 60);
+    const w = Math.max(4, (s.duration_ms / maxDur) * 40);
+    const bg = s.intensity > 0 ? color : 'transparent';
+    return `<div class="haptic-bar" style="height:${h}px;width:${w}px;background:${bg}"></div>`;
+  }).join('');
+}
+
+// WebSocket connection
+let ws;
+function connect() {
+  const wsPort = new URLSearchParams(window.location.search).get('ws_port') || '8765';
+  ws = new WebSocket(`ws://localhost:${wsPort}`);
+
+  ws.onopen = () => {
+    document.getElementById('conn-dot').className = 'conn-dot connected';
+    document.getElementById('conn-text').textContent = '接続済み';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('conn-dot').className = 'conn-dot disconnected';
+    document.getElementById('conn-text').textContent = '切断 — 再接続中...';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.intelligibility_ratio != null) {
+      updateRing(data.intelligibility_ratio);
+    }
+    updateRoomProfile(data);
+    updateCause(data);
+    updateHaptic(data);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

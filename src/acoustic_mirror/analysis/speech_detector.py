@@ -19,6 +19,7 @@ class SpeechResult:
     speech_ratio: float
     noise_floor_db: float
     energy_db: float
+    frame_energies: list[float] = None  # type: ignore[assignment]  # per-frame dB values
 
 
 def frame_energy_db(frame: np.ndarray) -> float:
@@ -54,19 +55,34 @@ class SpeechDetector:
         if n_frames == 0:
             nf = self._noise_floor_db()
             return SpeechResult(
-                is_speech=False, speech_ratio=0.0, noise_floor_db=nf, energy_db=-80.0
+                is_speech=False, speech_ratio=0.0, noise_floor_db=nf,
+                energy_db=-80.0, frame_energies=[],
             )
 
+        # Compute per-frame energies
         frame_energies = []
         for i in range(n_frames):
             start = i * self._frame_size
             frame = chunk[start : start + self._frame_size]
-            e = frame_energy_db(frame)
-            frame_energies.append(e)
-            self._energy_history.append(e)
+            frame_energies.append(frame_energy_db(frame))
 
+        # Use previous noise floor for classification, then update history
+        # with only non-speech frames to avoid contamination (Bug 4)
         noise_floor = self._noise_floor_db()
         threshold = noise_floor + self._threshold_db
+
+        for e in frame_energies:
+            if e <= threshold:
+                self._energy_history.append(e)
+
+        # If no non-speech frames were added and history is empty, add all
+        # (bootstrap phase — need some data to start)
+        if not self._energy_history:
+            for e in frame_energies:
+                self._energy_history.append(e)
+
+        # Recompute noise floor after update
+        noise_floor = self._noise_floor_db()
 
         speech_frames = sum(1 for e in frame_energies if e > threshold)
         speech_ratio = speech_frames / n_frames
@@ -77,4 +93,5 @@ class SpeechDetector:
             speech_ratio=speech_ratio,
             noise_floor_db=noise_floor,
             energy_db=avg_energy,
+            frame_energies=frame_energies,
         )

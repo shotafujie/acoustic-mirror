@@ -285,7 +285,7 @@ function updateRoomProfile(data) {
 function updateCause(data) {
   const el = document.getElementById('cause-content');
   if (!data.primary_cause) {
-    el.innerHTML = '<div class="cause-inactive">了解度が低下した場合に原因を表示</div>';
+    // Don't clear — keep previous cause display visible
     return;
   }
   const c = data.primary_cause;
@@ -303,7 +303,8 @@ function updateHaptic(data) {
   const container = document.getElementById('haptic-bars');
   const nameEl = document.getElementById('haptic-name');
   if (!data.haptic_pattern) {
-    container.innerHTML = '';
+    // Don't clear — keep previous haptic display visible
+    return;
     nameEl.textContent = '--';
     return;
   }

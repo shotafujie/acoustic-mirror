@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from acoustic_mirror.analysis.cause_separator import CauseResult, CauseSeparator
-from acoustic_mirror.analysis.room_profiler import RoomProfile, RoomProfiler
+from acoustic_mirror.analysis.room_profiler import RoomProfile, RoomProfiler, estimate_drr
 from acoustic_mirror.analysis.speech_detector import SpeechDetector, SpeechResult
 from acoustic_mirror.analysis.srmr import SRMRProcessor
 from acoustic_mirror.audio.buffer import RingBuffer
@@ -81,11 +81,45 @@ class AnalysisPipeline:
     """Orchestrates all analysis modules for a single audio chunk."""
 
     def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
+        self._sample_rate = sample_rate
         self._speech_detector = SpeechDetector(sample_rate=sample_rate)
         self._room_profiler = RoomProfiler(sample_rate=sample_rate)
         self._srmr_processor = SRMRProcessor(sample_rate=sample_rate)
         self._cause_separator = CauseSeparator()
         self._prev_speech = False
+        self._prev_chunk: np.ndarray | None = None
+        self._prev_frame_energies: list[float] = []
+        # Persist last speech-frame results so non-speech frames don't clear them
+        self._last_srmr_score: float | None = None
+        self._last_cause: CauseResult | None = None
+        self._last_haptic: dict | None = None
+
+    def _find_speech_offset(self, frame_energies: list[float], threshold_db: float) -> int | None:
+        """Find the last speech frame index (frame where energy drops below threshold)."""
+        last_speech = None
+        for i, e in enumerate(frame_energies):
+            if e > threshold_db:
+                last_speech = i
+        return last_speech
+
+    def _extract_decay_segment(self, chunk: np.ndarray, frame_energies: list[float]) -> np.ndarray | None:
+        """Extract the decay tail from a chunk that contains a speech→silence transition."""
+        if not frame_energies:
+            return None
+        threshold = self._speech_detector._noise_floor_db() + self._speech_detector._threshold_db
+        offset_frame = self._find_speech_offset(frame_energies, threshold)
+        if offset_frame is None:
+            return None
+        # Start from the frame after the last speech frame
+        frame_size = self._speech_detector._frame_size
+        start_sample = (offset_frame + 1) * frame_size
+        if start_sample >= len(chunk):
+            return None
+        decay = chunk[start_sample:]
+        # Need at least 50ms of decay for meaningful estimation
+        if len(decay) < int(self._sample_rate * 0.05):
+            return None
+        return decay
 
     def process(self, chunk: np.ndarray) -> AnalysisResult:
         timestamp = time.time()
@@ -96,11 +130,28 @@ class AnalysisPipeline:
         # Update room profiler noise floor
         self._room_profiler.update_noise_floor(speech_result.noise_floor_db)
 
-        # Detect speech→silence transition for RT60 estimation
-        if self._prev_speech and not speech_result.is_speech:
-            # Use the tail of this chunk as a decay segment
-            self._room_profiler.update_rt60(chunk)
+        # Detect speech→silence transition for RT60 estimation (Bug 1+2 fix)
+        # Use the PREVIOUS chunk (which contained speech) to find the decay tail
+        if self._prev_speech and not speech_result.is_speech and self._prev_chunk is not None:
+            decay = self._extract_decay_segment(self._prev_chunk, self._prev_frame_energies)
+            if decay is not None:
+                self._room_profiler.update_rt60(decay)
+
+        # DRR estimation on speech onset (Bug 5 fix)
+        if not self._prev_speech and speech_result.is_speech:
+            threshold = speech_result.noise_floor_db + self._speech_detector._threshold_db
+            onset_frame = next(
+                (i for i, e in enumerate(speech_result.frame_energies) if e > threshold),
+                None,
+            )
+            if onset_frame is not None:
+                onset_sample = onset_frame * self._speech_detector._frame_size
+                drr = estimate_drr(chunk, self._sample_rate, onset=onset_sample)
+                self._room_profiler.update_drr(drr)
+
         self._prev_speech = speech_result.is_speech
+        self._prev_chunk = chunk.copy()
+        self._prev_frame_energies = speech_result.frame_energies
 
         room_profile = self._room_profiler.current_profile
 
@@ -114,12 +165,17 @@ class AnalysisPipeline:
         )
 
         if not speech_result.is_speech:
+            # Carry forward last speech results (Bug 3 fix)
+            result.srmr_score = self._last_srmr_score
+            result.cause = self._last_cause
+            result.haptic_pattern = self._last_haptic
             return result
 
         # Step 2: SRMR computation
         srmr_result = self._srmr_processor.process(chunk, is_speech=True)
         if srmr_result.is_valid:
             result.srmr_score = srmr_result.srmr_score
+            self._last_srmr_score = srmr_result.srmr_score
 
             # Step 3: Cause separation (if below target)
             if srmr_result.srmr_score < room_profile.srmr_target:
@@ -129,14 +185,20 @@ class AnalysisPipeline:
                     room_profile,
                 )
                 result.cause = cause
+                self._last_cause = cause
 
                 # Step 4: Haptic pattern lookup
                 if cause.primary_cause is not None and cause.severity > 0.3:
                     try:
                         pattern = get_pattern(cause.primary_cause)
                         result.haptic_pattern = pattern.to_dict()
+                        self._last_haptic = result.haptic_pattern
                     except KeyError:
                         pass
+            else:
+                # SRMR is good — clear persisted cause
+                self._last_cause = None
+                self._last_haptic = None
 
         return result
 

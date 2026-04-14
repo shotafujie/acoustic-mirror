@@ -75,18 +75,34 @@ class TestSpeechDetector:
         assert result.speech_ratio == pytest.approx(1.0, abs=0.1)
 
     def test_noise_floor_adapts(self):
+        """Noise floor adapts when background noise increases gradually."""
         det = SpeechDetector(sample_rate=SAMPLE_RATE)
-        # Feed quiet signal
-        quiet = np.full(8000, 1e-4, dtype=np.float32)
+        # Feed quiet signal to establish baseline (-60 dB)
+        quiet = np.full(8000, 1e-3, dtype=np.float32)
         for _ in range(10):
             det.process(quiet)
         floor1 = det.process(quiet).noise_floor_db
-        # Feed louder background
-        louder = np.full(8000, 1e-2, dtype=np.float32)
+        # Feed slightly louder background (~-56 dB, within 6dB threshold)
+        moderate = np.full(8000, 1.5e-3, dtype=np.float32)
         for _ in range(20):
-            det.process(louder)
-        floor2 = det.process(louder).noise_floor_db
+            det.process(moderate)
+        floor2 = det.process(moderate).noise_floor_db
         assert floor2 > floor1
+
+    def test_noise_floor_not_contaminated_by_speech(self):
+        """Noise floor should not rise when speech is present."""
+        det = SpeechDetector(sample_rate=SAMPLE_RATE)
+        quiet = np.full(8000, 1e-5, dtype=np.float32)
+        for _ in range(10):
+            det.process(quiet)
+        floor_before = det.process(quiet).noise_floor_db
+        # Feed loud speech-like signal
+        loud = np.full(8000, 0.3, dtype=np.float32)
+        for _ in range(10):
+            det.process(loud)
+        # Return to quiet — noise floor should not have risen
+        floor_after = det.process(quiet).noise_floor_db
+        assert abs(floor_after - floor_before) < 3  # within 3dB
 
     def test_result_has_all_fields(self, silence_chunk):
         det = SpeechDetector(sample_rate=SAMPLE_RATE)
@@ -95,3 +111,12 @@ class TestSpeechDetector:
         assert hasattr(result, "speech_ratio")
         assert hasattr(result, "noise_floor_db")
         assert hasattr(result, "energy_db")
+        assert hasattr(result, "frame_energies")
+
+    def test_frame_energies_returned(self):
+        det = SpeechDetector(sample_rate=SAMPLE_RATE)
+        chunk = np.ones(8000, dtype=np.float32)
+        result = det.process(chunk)
+        # 500ms / 30ms = 16 full frames
+        assert len(result.frame_energies) == 16
+        assert all(isinstance(e, float) for e in result.frame_energies)

@@ -51,7 +51,7 @@ Accepted
 ### 設計
 
 **RT60**:
-1. `estimate_rt60_from_decay` の内部処理をSchroeder積分に置き換える。**Schroeder積分は生波形サンプルにではなく、既存の10msフレームエネルギー配列（`energies`, 300ms観測なら30点程度の小配列）に対して適用する**（`np.cumsum(energies[::-1])[::-1]`）。生波形（sample_rate×300ms=4800サンプル）に対して逆順コピー・二乗・累積和を行うのはリアルタイムループの発話終了イベントごとに不要なアロケーションを生むため避ける（レビュー指摘への対応）。
+1. `estimate_rt60_from_decay` の内部処理をSchroeder積分に置き換える。**Schroeder積分は生波形サンプルにではなく、既存の10msフレームエネルギー配列（`energies`, 300ms観測なら30点程度の小配列）に対して適用する**（`np.cumsum(energies[::-1])[::-1]`）。生波形（sample_rate×300ms=4800サンプル）に対して逆順コピー・二乗・累積和を行うのはリアルタイムループの発話終了イベントごとに不要なアロケーションを生むため避ける（レビュー指摘への対応）。**Schroeder積分は観測区間の末尾で急激に立ち下がる打ち切り誤差（末尾はそれ以上積算するエネルギーがなく、真の減衰曲線より急な傾きになる）を持つ。この打ち切り誤差はなめらかで高いR²のまま回帰を誤らせるため、R²ゲートだけでは検出できない。積分後の曲線から末尾10〜20%を切り捨ててからT20回帰にかける**ことで対策する。既知のRT60でシミュレーションし、観測区間を意図的に短く打ち切った場合でも推定値が許容誤差内に収まることを確認する専用テストを#10のハーネスに追加する（実装前検討で追加）。
 2. 回帰区間をピークから-30dBではなくT20（-5dB〜-25dB）に限定し、60dB相当に外挿する。T20区間が確保できない場合はT10などへのフォールバックはせず、`is_valid=False` として推定をスキップする（理由は下記「未決事項への回答」を参照）。
 3. `_extract_decay_segment`（main.py）の最低減衰長を `sample_rate * 0.05`（50ms）から `sample_rate * 0.3`（300ms）に引き上げる。
 4. 信頼度は `scipy.stats.linregress` が返す `rvalue` を再利用し `rvalue ** 2`（R²）とする。**別途R²を計算する処理は追加しない**（レビュー指摘への対応: 二重計算の防止）。
@@ -72,7 +72,7 @@ Accepted
 
 ## 影響
 
-- `estimate_drr` → `estimate_early_to_late_ratio` へのリネームに加え、`RoomProfile.drr_db` → `early_to_late_ratio_db` へのフィールド名変更も行う。呼び出し元（main.py）・既存テスト・`to_dict()`の出力キーへの破壊的変更。
+- `estimate_drr` → `estimate_early_to_late_ratio` へのリネームに加え、`RoomProfile.drr_db` → `early_to_late_ratio_db` へのフィールド名変更も行う。呼び出し元（main.py）・既存テスト・`to_dict()`の出力キーへの破壊的変更。**実装前検討で洗い出した実際の消費箇所**: `analysis/cause_separator.py:57`（`room_profile.drr_db`を距離診断のスコアに使用）と `dashboard/index.html:280`（WebSocket経由で受け取った`rp.drr_db`をDOMに表示）。両方をリネームに合わせて更新しないと、ダッシュボードはエラーを出さずに`undefined`を表示し続ける（サイレント障害になるため実装時に必ずgrepで確認する）。
 - `estimate_rt60_from_decay` の戻り値変更（float → `RT60Estimate` dataclass）は `RoomProfiler.update_rt60` の内部だけに閉じ込め、`RoomProfiler._rt60_estimates`（deque）の型は変更しない。呼び出し元とテストへの影響は `estimate_rt60_from_decay` を直接呼んでいるテストのみに限定される。
 - `RoomProfile` に `rt60_confidence` フィールドが増えるため、`to_dict()`（main.py の `AnalysisResult.to_dict()`）やテストフィクスチャに影響する。
 - RT60推定が「出さない」ケースが増えるため、起動直後や環境ノイズが大きい場面で `RoomProfiler._rt60_estimates` が空のまま続く期間が伸びる可能性がある。これは許容するリスクとして受け入れる（デフォルト値0.2sのまま部屋分類が続くが、誤った低RT60推定よりは安全側）。

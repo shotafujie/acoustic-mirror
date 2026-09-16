@@ -21,7 +21,18 @@ from scipy import stats
 _RT60_MIN = 0.05
 _RT60_MAX = 3.0
 _RT60_CONFIDENCE_MIN = 0.5  # below this R^2, don't trust the fit (ADR-0003)
-_RT60_SCHROEDER_TAIL_TRIM = 0.15  # fraction of frames dropped from the tail
+# Frames dropped from the Schroeder integral's tail before fitting, as a
+# FIXED duration rather than a fraction of the window (ADR-0003, revised
+# after advisor review). The integral's truncation knee — where the curve
+# collapses because there's no more future energy to accumulate — has a
+# roughly fixed absolute extent regardless of window length; a
+# proportional trim protects short windows far less than long ones (at a
+# 100ms window a 15% trim drops one 10ms frame, leaving the knee to
+# dominate most of the T20 fit — verified to produce a biased-short
+# estimate at HIGH confidence, which the R^2 gate does not catch on its
+# own). A fixed trim makes short windows self-reject via insufficient T20
+# coverage instead of returning a confidently wrong number.
+_RT60_SCHROEDER_TAIL_TRIM_MS = 50.0
 _EARLY_TO_LATE_FLOOR = 1e-10  # avoid log10(0)
 
 
@@ -97,11 +108,14 @@ def estimate_rt60_from_decay(decay_signal: np.ndarray, sample_rate: int) -> RT60
     (-5dB to -25dB below the integral's peak) of the integrated curve in dB
     and extrapolates to -60dB.
 
-    The last _RT60_SCHROEDER_TAIL_TRIM fraction of frames is dropped before
+    The last _RT60_SCHROEDER_TAIL_TRIM_MS of frames are dropped before
     fitting: the Schroeder integral necessarily collapses toward zero at
     the end of a truncated observation window (there's no more energy left
     to accumulate), producing a smooth, high-R^2 but biased-steep knee that
-    the confidence gate alone would not catch (see docs/adr/ADR-0003).
+    the confidence gate alone would not catch (see docs/adr/ADR-0003). This
+    trim is a fixed duration, not a fraction of the window — the knee's
+    extent doesn't shrink with the window, so a short window needs the same
+    absolute protection a long one does.
     """
     signal = decay_signal.astype(np.float64)
 
@@ -123,7 +137,7 @@ def estimate_rt60_from_decay(decay_signal: np.ndarray, sample_rate: int) -> RT60
     # waveform — see docs/adr/ADR-0003.
     schroeder = np.cumsum(energies[::-1])[::-1]
 
-    trim = max(1, int(n_frames * _RT60_SCHROEDER_TAIL_TRIM))
+    trim = max(1, int(_RT60_SCHROEDER_TAIL_TRIM_MS / 10))  # frame_size is fixed at 10ms
     schroeder = schroeder[: n_frames - trim]
     n_frames_trimmed = len(schroeder)
     if n_frames_trimmed < 3:

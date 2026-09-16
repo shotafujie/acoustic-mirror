@@ -62,12 +62,36 @@ class TestRT60Estimation:
         though the knee itself is smooth (high R^2). Truncate a known-RT60
         decay to a short window and check the estimate is still close, not
         silently biased short by the knee.
+
+        Asserts is_valid explicitly (not `if estimate.is_valid: ...`) —
+        that conditional form previously let this test pass vacuously
+        whenever the estimate was rejected, which is exactly what
+        happened with the first (proportional-trim) implementation of
+        this fix: it silently accepted a confidently biased-short
+        estimate instead of either rejecting it or getting it right.
         """
         full_decay = _make_decay(0.4, duration=1.0)
         truncated = full_decay[: int(0.35 * SAMPLE_RATE)]  # cut well before -60dB
         estimate = estimate_rt60_from_decay(truncated, SAMPLE_RATE)
+        assert estimate.is_valid
+        assert abs(estimate.rt60 - 0.4) < 0.15
+
+    @pytest.mark.parametrize("dur_ms", [100, 120, 150, 200, 300, 500])
+    def test_short_windows_are_accurate_or_self_reject(self, dur_ms):
+        """Regression guard for the truncation-knee bias found via advisor
+        review: a proportional tail trim let a 100ms window of a true
+        0.3s-RT60 decay return rt60=0.2519 at confidence 0.9961 — a
+        confidently wrong answer the R^2 gate didn't catch. Every window
+        length must now either land close to the true value or reject
+        outright; it must never land far off with high confidence.
+        """
+        true_rt60 = 0.3
+        n = int(SAMPLE_RATE * dur_ms / 1000)
+        t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
+        decay = (0.3 * np.exp(-6.908 * t / true_rt60)).astype(np.float32)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
         if estimate.is_valid:
-            assert abs(estimate.rt60 - 0.4) < 0.15
+            assert abs(estimate.rt60 - true_rt60) < 0.08
 
     def test_rt60_clamps_to_valid_range(self):
         """Extreme inputs should produce clamped RT60."""

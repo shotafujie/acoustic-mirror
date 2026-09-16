@@ -53,7 +53,57 @@ class TestGammatoneFilterbank:
         assert np.max(np.abs(output)) < 1e-6
 
 
+def _compute_modulation_energy_rectangular_window(envelopes: np.ndarray, sample_rate: int, n_mod_bands: int = 8) -> np.ndarray:
+    """Test-local reimplementation of compute_modulation_energy without
+    the Hann window (issue #5's "before" state), used only as a
+    comparison baseline to verify the window actually reduces leakage —
+    not a production code path.
+    """
+    from scipy.signal import decimate
+
+    from acoustic_mirror.analysis.srmr import _modulation_filterbank_centers
+
+    mod_centers = _modulation_filterbank_centers(n_mod_bands)
+    downsample_factor = max(1, sample_rate // 400)
+    env_ds = decimate(envelopes, downsample_factor, ftype="fir", zero_phase=True, axis=1)
+    ds_rate = sample_rate / downsample_factor
+    n_fft = env_ds.shape[1]
+    env_ds = env_ds - np.mean(env_ds, axis=1, keepdims=True)
+    spectrum = np.abs(np.fft.rfft(env_ds, axis=1)) ** 2  # no window
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / ds_rate)
+    energy = np.zeros((envelopes.shape[0], n_mod_bands))
+    for b in range(n_mod_bands):
+        cf = mod_centers[b]
+        bw = cf / 2.0
+        mask = (freqs >= cf - bw / 2) & (freqs < cf + bw / 2)
+        energy[:, b] = np.sum(spectrum[:, mask], axis=1)
+    return energy
+
+
 class TestModulationEnergy:
+    def test_hann_window_reduces_spectral_leakage_into_high_mod_bands(self):
+        """Issue #5: without a window, a strong low-modulation envelope
+        component not aligned to an FFT bin leaks into the high-modulation
+        (denominator) bands via spectral leakage, systematically lowering
+        SRMR. Compares the production function (which applies a Hann
+        window) against a rectangular-window reference reimplemented
+        locally in this test (see
+        _compute_modulation_energy_rectangular_window above).
+        """
+        n_samples = 8000
+        t = np.arange(n_samples, dtype=np.float64) / SAMPLE_RATE
+        # 4.3Hz: strong low-modulation content, deliberately not aligned to
+        # an FFT bin (2Hz spacing) so its energy would otherwise leak.
+        env = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 4.3 * t), (23, 1))
+
+        energy_windowed = compute_modulation_energy(env, SAMPLE_RATE)
+        energy_rectangular = _compute_modulation_energy_rectangular_window(env, SAMPLE_RATE)
+
+        high_mod_leak_windowed = energy_windowed[:, 4:].sum() / energy_windowed.sum()
+        high_mod_leak_rectangular = energy_rectangular[:, 4:].sum() / energy_rectangular.sum()
+
+        assert high_mod_leak_windowed < 0.1 * high_mod_leak_rectangular
+
     def test_high_frequency_envelope_content_does_not_alias_into_modulation_bands(self):
         """Issue #4: naive striding (no anti-alias filter) folds envelope
         content above the downsampled Nyquist (~200Hz) back into the

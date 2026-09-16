@@ -192,6 +192,37 @@ class TestRoomClassification:
         for rt in RoomType:
             assert rt.srmr_target > 0
 
+    def test_srmr_targets_match_calibrated_values(self):
+        """Locks in the specific thresholds calibrated in ADR-0001 against
+        this implementation's own output distribution (measured via
+        tests/synth.py's synth_speech()/apply_reverb(), 5 seeds per RT60
+        condition — see room_profiler.py's _SRMR_TARGETS comment for the
+        full table). A future SRMR implementation change that shifts the
+        score distribution should also intentionally update these values
+        (and re-run the calibration measurement), not silently drift.
+        """
+        assert RoomType.QUIET_SMALL.srmr_target == pytest.approx(3.3)
+        assert RoomType.NOISY_SMALL.srmr_target == pytest.approx(2.3)
+        assert RoomType.MEDIUM_ROOM.srmr_target == pytest.approx(2.2)
+        assert RoomType.NOISY_MEDIUM.srmr_target == pytest.approx(1.4)
+        assert RoomType.REVERBERANT.srmr_target == pytest.approx(1.1)
+        assert RoomType.REVERBERANT_NOISY.srmr_target == pytest.approx(0.7)
+
+    def test_srmr_targets_decrease_with_reverberation(self):
+        """Independent of the exact calibrated numbers: a quieter/drier
+        room type must always have a higher (harder to reach) SRMR target
+        than a noisier/more reverberant one — this is the structural
+        property the calibration is supposed to preserve.
+        """
+        assert RoomType.QUIET_SMALL.srmr_target > RoomType.MEDIUM_ROOM.srmr_target > RoomType.REVERBERANT.srmr_target
+        assert RoomType.NOISY_SMALL.srmr_target > RoomType.NOISY_MEDIUM.srmr_target > RoomType.REVERBERANT_NOISY.srmr_target
+        for quiet, noisy in [
+            (RoomType.QUIET_SMALL, RoomType.NOISY_SMALL),
+            (RoomType.MEDIUM_ROOM, RoomType.NOISY_MEDIUM),
+            (RoomType.REVERBERANT, RoomType.REVERBERANT_NOISY),
+        ]:
+            assert quiet.srmr_target > noisy.srmr_target
+
 
 class TestRoomProfiler:
     def test_produces_room_profile(self):

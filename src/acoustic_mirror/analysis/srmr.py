@@ -10,7 +10,7 @@ Measure of Reverberant and Dereverberated Speech"
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import gammatone, hilbert, sosfilt
+from scipy.signal import gammatone, hilbert
 
 _ENERGY_FLOOR = 1e-10
 
@@ -30,46 +30,6 @@ class SRMRResult:
     srmr_score: float
     energy: np.ndarray  # (n_channels, n_mod_bands)
     is_valid: bool
-
-
-class GammatoneFilterbank:
-    """Bank of gammatone bandpass filters on the ERB scale."""
-
-    def __init__(
-        self,
-        n_filters: int = 23,
-        low_freq: float = 125.0,
-        high_freq: float = 7500.0,
-        sample_rate: int = 16000,
-    ) -> None:
-        self._n_filters = n_filters
-        self._sample_rate = sample_rate
-        self._center_freqs = _erb_space(low_freq, high_freq, n_filters)
-
-        # Pre-compute SOS coefficients for each channel
-        self._sos_list = []
-        for cf in self._center_freqs:
-            b, a = gammatone(cf, ftype="fir", order=4, numtaps=129, fs=sample_rate)
-            # Store as FIR coefficients (b) — wrap in SOS-like structure
-            self._sos_list.append((b, a))
-
-    @property
-    def n_filters(self) -> int:
-        return self._n_filters
-
-    @property
-    def center_frequencies(self) -> np.ndarray:
-        return self._center_freqs.copy()
-
-    def apply(self, signal: np.ndarray) -> np.ndarray:
-        """Apply all filters to the signal. Returns (n_filters, n_samples)."""
-        output = np.empty((self._n_filters, len(signal)), dtype=np.float64)
-        for i, (b, a) in enumerate(self._sos_list):
-            output[i] = sosfilt(
-                np.array([[*b[:3], 1, 0, 0]]),  # wrap FIR as single SOS section
-                signal.astype(np.float64),
-            )
-        return output
 
 
 def _apply_fir(b: np.ndarray, signal: np.ndarray) -> np.ndarray:

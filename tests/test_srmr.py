@@ -8,6 +8,7 @@ from acoustic_mirror.analysis.srmr import (
     SRMRProcessor,
     compute_modulation_energy,
 )
+from tests.synth import apply_reverb, synth_speech
 
 SAMPLE_RATE = 16000
 
@@ -124,3 +125,26 @@ class TestSRMR:
         proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
         result = proc.process(speech_like_chunk, is_speech=True)
         assert result.energy.shape == (23, 8)
+
+
+class TestSRMRValidityAgainstSyntheticReverb:
+    """Issue #10: the indicator must be monotonic in a known, controllable
+    reverberation amount. Uses a 3s window (SRMR is a whole-utterance
+    metric — see ADR-0002) with synthetic exponential-decay RIRs at known
+    RT60 values.
+    """
+
+    RT60_CONDITIONS = [0.16, 0.36, 0.61, 1.0]
+
+    def test_srmr_decreases_as_rt60_increases(self):
+        speech = synth_speech(dur=3.0, sample_rate=SAMPLE_RATE)
+        proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
+        dry_score = proc.process(speech, is_speech=True).srmr_score
+
+        scores = [dry_score]
+        for rt60 in self.RT60_CONDITIONS:
+            wet = apply_reverb(speech, rt60, sample_rate=SAMPLE_RATE)
+            proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
+            scores.append(proc.process(wet, is_speech=True).srmr_score)
+
+        assert scores == sorted(scores, reverse=True)

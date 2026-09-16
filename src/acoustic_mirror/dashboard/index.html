@@ -277,7 +277,7 @@ function updateRoomProfile(data) {
   const rp = data.room_profile;
   document.getElementById('rt60').textContent = rp.rt60.toFixed(2);
   document.getElementById('noise-floor').textContent = rp.noise_floor_db.toFixed(1);
-  document.getElementById('drr').textContent = rp.drr_db.toFixed(1);
+  document.getElementById('drr').textContent = rp.early_to_late_ratio_db.toFixed(1);
   document.getElementById('srmr-target').textContent = rp.srmr_target.toFixed(1);
   document.getElementById('room-type').textContent = rp.room_type;
 }

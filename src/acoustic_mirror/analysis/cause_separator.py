@@ -53,8 +53,8 @@ class CauseSeparator:
         # Noise: ramps from -50dBFS to -30dBFS
         noise_score = float(np.clip((room_profile.noise_floor_db + 50) / 20, 0, 1))
 
-        # Distance: ramps from DRR=5dB down to -5dB
-        distance_score = float(np.clip((5 - room_profile.drr_db) / 10, 0, 1))
+        # Distance: ramps from early-to-late ratio=5dB down to -5dB
+        distance_score = float(np.clip((5 - room_profile.early_to_late_ratio_db) / 10, 0, 1))
 
         # Articulation: residual — high when other scores are low
         max_env = max(reverb_score, noise_score, distance_score)

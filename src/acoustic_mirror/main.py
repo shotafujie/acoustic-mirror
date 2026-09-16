@@ -15,7 +15,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from acoustic_mirror.analysis.cause_separator import CauseResult, CauseSeparator
-from acoustic_mirror.analysis.room_profiler import RoomProfile, RoomProfiler, estimate_drr
+from acoustic_mirror.analysis.room_profiler import (
+    RoomProfile,
+    RoomProfiler,
+    estimate_early_to_late_ratio,
+)
 from acoustic_mirror.analysis.speech_detector import SpeechDetector, SpeechResult
 from acoustic_mirror.analysis.srmr import SRMRProcessor
 from acoustic_mirror.audio.buffer import RingBuffer
@@ -84,9 +88,10 @@ class AnalysisResult:
             d["room_profile"] = {
                 "rt60": round(rp.rt60, 3),
                 "noise_floor_db": round(rp.noise_floor_db, 1),
-                "drr_db": round(rp.drr_db, 1),
+                "early_to_late_ratio_db": round(rp.early_to_late_ratio_db, 1),
                 "room_type": rp.room_type.value,
                 "srmr_target": rp.srmr_target,
+                "rt60_confidence": round(rp.rt60_confidence, 2),
             }
         if self.srmr_score is not None and self.room_profile is not None:
             ratio = self.srmr_score / self.room_profile.srmr_target
@@ -150,10 +155,25 @@ class AnalysisPipeline:
         if start_sample >= len(chunk):
             return None
         decay = chunk[start_sample:]
-        # Need at least 50ms of decay for meaningful estimation
-        if len(decay) < int(self._sample_rate * 0.05):
+        # Need at least 300ms of decay (ADR-0003): 50ms was too short to
+        # extrapolate a 60dB decay from without mostly measuring the noise
+        # floor's own slope.
+        if len(decay) < int(self._sample_rate * 0.3):
             return None
         return decay
+
+    def _is_isolated_onset(self, onset_frame: int, frame_energies: list[float], threshold_db: float) -> bool:
+        """True if no frame in the ~200ms preceding the onset was above the
+        speech threshold (ADR-0003's isolated-onset gate). Without this,
+        the "late" window of estimate_early_to_late_ratio can catch the
+        previous syllable's direct sound rather than pure reverberant
+        tail, in continuous speech.
+        """
+        isolation_ms = 200.0
+        frame_ms = self._speech_detector._frame_size / self._sample_rate * 1000
+        n_isolation_frames = max(1, round(isolation_ms / frame_ms))
+        preceding = list(self._prev_frame_energies)[-n_isolation_frames:] + frame_energies[:onset_frame]
+        return all(e <= threshold_db for e in preceding)
 
     def process(self, chunk: np.ndarray, srmr_window: np.ndarray | None = None) -> AnalysisResult:
         """Run one analysis tick.
@@ -181,17 +201,20 @@ class AnalysisPipeline:
             if decay is not None:
                 self._room_profiler.update_rt60(decay)
 
-        # DRR estimation on speech onset (Bug 5 fix)
+        # Early-to-late ratio estimation on speech onset (Bug 5 fix; ADR-0003
+        # restricts this to isolated onsets — see _is_isolated_onset)
         if not self._prev_speech and speech_result.is_speech:
             threshold = speech_result.noise_floor_db + self._speech_detector._threshold_db
             onset_frame = next(
                 (i for i, e in enumerate(speech_result.frame_energies) if e > threshold),
                 None,
             )
-            if onset_frame is not None:
+            if onset_frame is not None and self._is_isolated_onset(
+                onset_frame, speech_result.frame_energies, threshold
+            ):
                 onset_sample = onset_frame * self._speech_detector._frame_size
-                drr = estimate_drr(chunk, self._sample_rate, onset=onset_sample)
-                self._room_profiler.update_drr(drr)
+                ratio = estimate_early_to_late_ratio(chunk, self._sample_rate, onset=onset_sample)
+                self._room_profiler.update_early_to_late_ratio(ratio)
 
         self._prev_speech = speech_result.is_speech
         self._prev_chunk = chunk.copy()

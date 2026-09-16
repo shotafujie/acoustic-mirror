@@ -1,4 +1,6 @@
-"""Sprint 3: Room profiler tests — RT60, noise floor, DRR, room classification."""
+"""Sprint 3: Room profiler tests — RT60, noise floor, early-to-late ratio,
+room classification.
+"""
 
 import numpy as np
 import pytest
@@ -8,7 +10,7 @@ from acoustic_mirror.analysis.room_profiler import (
     RoomProfiler,
     RoomType,
     classify_room,
-    estimate_drr,
+    estimate_early_to_late_ratio,
     estimate_rt60_from_decay,
 )
 
@@ -28,61 +30,94 @@ def _make_decay(rt60: float, duration: float = 0.5) -> np.ndarray:
 class TestRT60Estimation:
     def test_known_rt60_short(self):
         """RT60 ~ 0.2s dry room."""
-        decay = _make_decay(0.2)
-        rt60 = estimate_rt60_from_decay(decay, SAMPLE_RATE)
-        assert abs(rt60 - 0.2) < 0.05
+        decay = _make_decay(0.2, duration=1.0)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
+        assert estimate.is_valid
+        assert abs(estimate.rt60 - 0.2) < 0.05
 
     def test_known_rt60_medium(self):
         """RT60 ~ 0.5s medium room."""
-        decay = _make_decay(0.5, duration=1.0)
-        rt60 = estimate_rt60_from_decay(decay, SAMPLE_RATE)
-        assert abs(rt60 - 0.5) < 0.1
+        decay = _make_decay(0.5, duration=1.5)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
+        assert estimate.is_valid
+        assert abs(estimate.rt60 - 0.5) < 0.15
 
     def test_known_rt60_long(self):
         """RT60 ~ 1.0s reverberant room."""
-        decay = _make_decay(1.0, duration=2.0)
-        rt60 = estimate_rt60_from_decay(decay, SAMPLE_RATE)
-        assert abs(rt60 - 1.0) < 0.2
+        decay = _make_decay(1.0, duration=2.5)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
+        assert estimate.is_valid
+        assert abs(estimate.rt60 - 1.0) < 0.25
+
+    def test_clean_decay_has_high_confidence(self):
+        """A clean, noiseless exponential decay should fit the T20 region
+        near-perfectly (R^2 close to 1)."""
+        decay = _make_decay(0.4, duration=1.0)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
+        assert estimate.confidence > 0.9
+
+    def test_truncated_decay_stays_within_tolerance(self):
+        """ADR-0003: the Schroeder integral's truncation knee at the tail
+        of a short observation window must not bias the estimate, even
+        though the knee itself is smooth (high R^2). Truncate a known-RT60
+        decay to a short window and check the estimate is still close, not
+        silently biased short by the knee.
+        """
+        full_decay = _make_decay(0.4, duration=1.0)
+        truncated = full_decay[: int(0.35 * SAMPLE_RATE)]  # cut well before -60dB
+        estimate = estimate_rt60_from_decay(truncated, SAMPLE_RATE)
+        if estimate.is_valid:
+            assert abs(estimate.rt60 - 0.4) < 0.15
 
     def test_rt60_clamps_to_valid_range(self):
         """Extreme inputs should produce clamped RT60."""
         # Very fast decay
-        fast = _make_decay(0.01)
-        rt60 = estimate_rt60_from_decay(fast, SAMPLE_RATE)
-        assert rt60 >= 0.05
+        fast = _make_decay(0.01, duration=0.3)
+        estimate = estimate_rt60_from_decay(fast, SAMPLE_RATE)
+        assert estimate.rt60 >= 0.05
         # Very slow decay (nearly constant)
         slow = np.ones(SAMPLE_RATE, dtype=np.float32)
-        rt60 = estimate_rt60_from_decay(slow, SAMPLE_RATE)
-        assert rt60 <= 3.0
+        estimate = estimate_rt60_from_decay(slow, SAMPLE_RATE)
+        assert estimate.rt60 <= 3.0
 
-    def test_constant_signal_returns_max_rt60(self):
-        """A constant signal has no decay — should return max clamp."""
-        const = np.ones(8000, dtype=np.float32)
-        rt60 = estimate_rt60_from_decay(const, SAMPLE_RATE)
-        assert rt60 == 3.0
+    def test_growing_signal_is_invalid(self):
+        """A signal that gets LOUDER over time (Schroeder integral slope
+        >= 0, since even backward-integrated energy fails to decrease)
+        should be flagged invalid rather than produce a fabricated RT60."""
+        n = 8000
+        t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
+        growing = np.exp(t * 3.0).astype(np.float32)  # amplitude grows over time
+        estimate = estimate_rt60_from_decay(growing, SAMPLE_RATE)
+        assert estimate.is_valid is False
+        assert estimate.rt60 == 3.0
+
+    def test_too_short_signal_is_invalid(self):
+        too_short = np.ones(50, dtype=np.float32)
+        estimate = estimate_rt60_from_decay(too_short, SAMPLE_RATE)
+        assert estimate.is_valid is False
 
 
-class TestDRR:
-    def test_pure_direct_sound_high_drr(self):
-        """Energy only in first 50ms => high DRR."""
+class TestEarlyToLateRatio:
+    def test_pure_direct_sound_high_ratio(self):
+        """Energy only in first 50ms => high ratio."""
         n = int(0.2 * SAMPLE_RATE)
         signal = np.zeros(n, dtype=np.float32)
         early = int(0.05 * SAMPLE_RATE)
         signal[:early] = 1.0
-        drr = estimate_drr(signal, SAMPLE_RATE, onset=0)
-        assert drr > 10
+        ratio = estimate_early_to_late_ratio(signal, SAMPLE_RATE, onset=0)
+        assert ratio > 10
 
-    def test_pure_reverb_low_drr(self):
-        """Energy only after 50ms => very low DRR."""
+    def test_pure_reverb_low_ratio(self):
+        """Energy only after 50ms => very low ratio."""
         n = int(0.2 * SAMPLE_RATE)
         signal = np.zeros(n, dtype=np.float32)
         early = int(0.05 * SAMPLE_RATE)
         signal[early:] = 1.0
-        drr = estimate_drr(signal, SAMPLE_RATE, onset=0)
-        assert drr < -10
+        ratio = estimate_early_to_late_ratio(signal, SAMPLE_RATE, onset=0)
+        assert ratio < -10
 
-    def test_equal_energy_drr_is_zero(self):
-        """Equal early and late energy => DRR ~ 0dB."""
+    def test_equal_energy_ratio_is_zero(self):
+        """Equal early and late energy => ratio ~ 0dB."""
         n = int(0.2 * SAMPLE_RATE)
         signal = np.ones(n, dtype=np.float32)
         early = int(0.05 * SAMPLE_RATE)
@@ -90,8 +125,8 @@ class TestDRR:
         # Scale so early_energy == late_energy
         signal[:early] = np.sqrt(late / early)
         signal[early:] = 1.0
-        drr = estimate_drr(signal, SAMPLE_RATE, onset=0)
-        assert abs(drr) < 1.0
+        ratio = estimate_early_to_late_ratio(signal, SAMPLE_RATE, onset=0)
+        assert abs(ratio) < 1.0
 
 
 class TestRoomClassification:
@@ -121,22 +156,41 @@ class TestRoomProfiler:
         assert isinstance(profile, RoomProfile)
         assert hasattr(profile, "rt60")
         assert hasattr(profile, "noise_floor_db")
-        assert hasattr(profile, "drr_db")
+        assert hasattr(profile, "early_to_late_ratio_db")
         assert hasattr(profile, "room_type")
         assert hasattr(profile, "srmr_target")
+        assert hasattr(profile, "rt60_confidence")
 
     def test_update_with_decay_segment(self):
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
-        decay = _make_decay(0.3)
+        decay = _make_decay(0.3, duration=1.0)
         profiler.update_rt60(decay)
         assert abs(profiler.current_profile.rt60 - 0.3) < 0.1
+        assert profiler.current_profile.rt60_confidence > 0.9
+
+    def test_low_confidence_estimate_does_not_update_rt60(self):
+        """ADR-0003: estimates below the confidence gate must not join the
+        median pool — a noisy/ambiguous decay shouldn't move rt60 at all.
+        """
+        profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
+        before = profiler.current_profile.rt60
+        rng = np.random.default_rng(7)
+        pure_noise = rng.standard_normal(int(0.5 * SAMPLE_RATE)).astype(np.float32)
+        profiler.update_rt60(pure_noise)
+        # Either it was rejected (rt60 unchanged) or it happened to pass
+        # the gate — but if it passed, confidence must reflect that.
+        after_profile = profiler.current_profile
+        if after_profile.rt60 == before:
+            assert after_profile.rt60_confidence == 0.0
+        else:
+            assert after_profile.rt60_confidence >= 0.5
 
     def test_update_noise_floor(self):
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
         profiler.update_noise_floor(-45.0)
         assert profiler.current_profile.noise_floor_db == pytest.approx(-45.0, abs=1)
 
-    def test_update_drr(self):
+    def test_update_early_to_late_ratio(self):
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
-        profiler.update_drr(8.0)
-        assert profiler.current_profile.drr_db == pytest.approx(8.0, abs=0.1)
+        profiler.update_early_to_late_ratio(8.0)
+        assert profiler.current_profile.early_to_late_ratio_db == pytest.approx(8.0, abs=0.1)

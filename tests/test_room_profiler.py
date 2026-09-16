@@ -93,6 +93,26 @@ class TestRT60Estimation:
         if estimate.is_valid:
             assert abs(estimate.rt60 - true_rt60) < 0.08
 
+    @pytest.mark.parametrize("true_rt60", [0.15, 0.3, 0.5, 0.8, 1.2, 1.5])
+    @pytest.mark.parametrize("dur_ms", [320, 400, 470])
+    def test_reachable_across_rt60_range_at_realistic_window_lengths(self, true_rt60, dur_ms):
+        """Regression guard for a third advisor-review hypothesis: that
+        long RT60s might never validate within the ~320-470ms windows
+        _extract_decay_segment can actually produce (a single 500ms
+        chunk's remainder — see the reachability sweep in test_main.py),
+        making REVERBERANT permanently unreachable the same way the 300ms
+        floor made all of RT60 estimation unreachable. Measured: all of
+        these combinations are is_valid=True (this test), though long
+        RT60s at short windows underestimate — see docs/adr/ADR-0003 for
+        the accepted risk that this can misclassify right at the 0.6s
+        room-type boundary, which this test does not cover.
+        """
+        n = int(SAMPLE_RATE * dur_ms / 1000)
+        t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
+        decay = (0.3 * np.exp(-6.908 * t / true_rt60)).astype(np.float32)
+        estimate = estimate_rt60_from_decay(decay, SAMPLE_RATE)
+        assert estimate.is_valid
+
     def test_rt60_clamps_to_valid_range(self):
         """Extreme inputs should produce clamped RT60."""
         # Very fast decay

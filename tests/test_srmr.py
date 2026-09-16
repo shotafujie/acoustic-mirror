@@ -54,6 +54,32 @@ class TestGammatoneFilterbank:
 
 
 class TestModulationEnergy:
+    def test_high_frequency_envelope_content_does_not_alias_into_modulation_bands(self):
+        """Issue #4: naive striding (no anti-alias filter) folds envelope
+        content above the downsampled Nyquist (~200Hz) back into the
+        modulation bands. A 300Hz envelope oscillation aliases to exactly
+        100Hz (the highest modulation band) under naive ::40 striding at
+        16kHz; decimate's built-in lowpass should suppress it instead.
+
+        Compares the aliasing probe's total captured energy against a
+        genuine 4Hz-modulated envelope of the same amplitude, rather than
+        against itself, since a pure single-tone probe trivially
+        concentrates 100% of whatever energy survives filtering in one
+        band regardless of how effective the anti-alias filter is.
+        """
+        n_samples = 8000
+        t = np.arange(n_samples, dtype=np.float64) / SAMPLE_RATE
+        alias_probe = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 300 * t), (23, 1))
+        genuine_modulation = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 4 * t), (23, 1))
+
+        probe_energy = compute_modulation_energy(alias_probe, SAMPLE_RATE).sum()
+        reference_energy = compute_modulation_energy(genuine_modulation, SAMPLE_RATE).sum()
+
+        # With anti-aliasing, the leaked energy from a 300Hz probe should
+        # be negligible next to genuine low-modulation content, not equal
+        # to it (naive striding leaks the full probe amplitude: ratio 1.0).
+        assert probe_energy < 0.01 * reference_energy
+
     def test_output_shape(self):
         """Modulation energy matrix should be (n_channels, n_mod_bands)."""
         rng = np.random.default_rng(42)

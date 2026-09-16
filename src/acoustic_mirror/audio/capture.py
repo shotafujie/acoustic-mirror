@@ -23,17 +23,26 @@ def list_devices() -> str:
 
 
 def open_stream(
-    buffer: RingBuffer,
+    vad_buffer: RingBuffer,
+    srmr_buffer: RingBuffer,
     device: int | None = None,
     sample_rate: int = 16000,
     block_size: int = 512,
 ) -> sd.InputStream:
-    """Open a sounddevice InputStream that writes audio to the ring buffer."""
+    """Open a sounddevice InputStream that fans audio out to both ring buffers.
+
+    Two buffers (not one shared window) because VAD/RT60/DRR need a short,
+    responsive window while SRMR needs several seconds of context — see
+    docs/adr/ADR-0002. Named explicitly rather than a `Sequence[RingBuffer]`
+    so each buffer's purpose is visible at the call site.
+    """
 
     def _callback(indata, frames, time_info, status):
         if status:
             pass  # drop overflows silently
-        buffer.write(indata[:, 0].copy())
+        data = indata[:, 0].copy()
+        vad_buffer.write(data)
+        srmr_buffer.write(data)
 
     stream = sd.InputStream(
         device=device,

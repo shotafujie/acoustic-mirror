@@ -9,6 +9,7 @@ import argparse
 import logging
 import signal
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -26,7 +27,34 @@ from acoustic_mirror.feedback.ws_server import WSBroadcaster
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-CHUNK_SAMPLES = 8000  # 500ms
+CHUNK_SAMPLES = 8000  # 500ms — VAD/RT60/DRR window (unchanged, see docs/adr/ADR-0002)
+SRMR_WINDOW_SAMPLES = 3 * SAMPLE_RATE  # 3s — SRMR's own analysis window (ADR-0002)
+
+# Gate thresholds for SRMR recomputation (ADR-0002). Initial values, tuned
+# by feel rather than measurement; revisit if #10's harness or real usage
+# shows they're off.
+_SRMR_GATE_MIN_SPEECH_RATIO = 0.7
+_SRMR_GATE_MIN_SECONDS_BETWEEN_COMPUTES = 1.0
+_SRMR_HISTORY_LEN = 6  # 6 * 500ms = 3s, matching SRMR_WINDOW_SAMPLES
+
+
+def should_recompute_srmr(
+    recent_speech_ratio: float,
+    seconds_since_last_compute: float,
+    buffer_full: bool,
+) -> bool:
+    """Pure gate function deciding whether to recompute SRMR this tick.
+
+    Kept free of state (ADR-0002) so the two independent conditions — how
+    much of the recent window was speech, and how long since the last
+    compute — can be reasoned about and tested without the caller's deques
+    and timers.
+    """
+    if not buffer_full:
+        return False
+    if recent_speech_ratio < _SRMR_GATE_MIN_SPEECH_RATIO:
+        return False
+    return seconds_since_last_compute >= _SRMR_GATE_MIN_SECONDS_BETWEEN_COMPUTES
 
 
 @dataclass
@@ -37,6 +65,7 @@ class AnalysisResult:
     noise_floor_db: float = -80.0
     energy_db: float = -80.0
     srmr_score: float | None = None
+    srmr_age_seconds: float | None = None
     room_profile: RoomProfile | None = None
     cause: CauseResult | None = None
     haptic_pattern: dict | None = None
@@ -65,6 +94,8 @@ class AnalysisResult:
             d["overall"] = (
                 "good" if ratio >= 0.8 else "warning" if ratio >= 0.5 else "alert"
             )
+        if self.srmr_age_seconds is not None:
+            d["srmr_age_seconds"] = round(self.srmr_age_seconds, 1)
         if self.cause is not None and self.cause.primary_cause is not None:
             d["primary_cause"] = {
                 "cause": self.cause.primary_cause,
@@ -91,8 +122,11 @@ class AnalysisPipeline:
         self._prev_frame_energies: list[float] = []
         # Persist last speech-frame results so non-speech frames don't clear them
         self._last_srmr_score: float | None = None
+        self._last_srmr_compute_time: float | None = None
         self._last_cause: CauseResult | None = None
         self._last_haptic: dict | None = None
+        # Recent VAD history feeding the SRMR recompute gate (ADR-0002)
+        self._srmr_speech_history: deque[bool] = deque(maxlen=_SRMR_HISTORY_LEN)
 
     def _find_speech_offset(self, frame_energies: list[float], threshold_db: float) -> int | None:
         """Find the last speech frame index (frame where energy drops below threshold)."""
@@ -121,7 +155,17 @@ class AnalysisPipeline:
             return None
         return decay
 
-    def process(self, chunk: np.ndarray) -> AnalysisResult:
+    def process(self, chunk: np.ndarray, srmr_window: np.ndarray | None = None) -> AnalysisResult:
+        """Run one analysis tick.
+
+        Args:
+            chunk: the 500ms VAD/RT60/DRR window (unchanged cadence).
+            srmr_window: the latest 3s SRMR window (ADR-0002), or None if
+                the SRMR ring buffer hasn't filled yet. SRMR is only
+                recomputed when this is provided AND the gate passes
+                (see `should_recompute_srmr`); otherwise the last computed
+                score/cause/haptic pattern are carried forward.
+        """
         timestamp = time.time()
 
         # Step 1: Speech detection
@@ -164,41 +208,54 @@ class AnalysisPipeline:
             room_profile=room_profile,
         )
 
-        if not speech_result.is_speech:
-            # Carry forward last speech results (Bug 3 fix)
-            result.srmr_score = self._last_srmr_score
-            result.cause = self._last_cause
-            result.haptic_pattern = self._last_haptic
-            return result
+        # Step 2: gate + (maybe) recompute SRMR on the 3s window (ADR-0002)
+        self._srmr_speech_history.append(speech_result.is_speech)
+        recent_speech_ratio = sum(self._srmr_speech_history) / len(self._srmr_speech_history)
+        seconds_since_last_compute = (
+            float("inf")
+            if self._last_srmr_compute_time is None
+            else timestamp - self._last_srmr_compute_time
+        )
+        if should_recompute_srmr(
+            recent_speech_ratio=recent_speech_ratio,
+            seconds_since_last_compute=seconds_since_last_compute,
+            buffer_full=srmr_window is not None,
+        ):
+            srmr_result = self._srmr_processor.process(srmr_window, is_speech=True)
+            if srmr_result.is_valid:
+                self._last_srmr_score = srmr_result.srmr_score
+                self._last_srmr_compute_time = timestamp
 
-        # Step 2: SRMR computation
-        srmr_result = self._srmr_processor.process(chunk, is_speech=True)
-        if srmr_result.is_valid:
-            result.srmr_score = srmr_result.srmr_score
-            self._last_srmr_score = srmr_result.srmr_score
+                # Step 3: Cause separation (if below target)
+                if srmr_result.srmr_score < room_profile.srmr_target:
+                    cause = self._cause_separator.diagnose(
+                        srmr_result.srmr_score,
+                        room_profile.srmr_target,
+                        room_profile,
+                    )
+                    self._last_cause = cause
 
-            # Step 3: Cause separation (if below target)
-            if srmr_result.srmr_score < room_profile.srmr_target:
-                cause = self._cause_separator.diagnose(
-                    srmr_result.srmr_score,
-                    room_profile.srmr_target,
-                    room_profile,
-                )
-                result.cause = cause
-                self._last_cause = cause
+                    # Step 4: Haptic pattern lookup
+                    if cause.primary_cause is not None and cause.severity > 0.3:
+                        try:
+                            self._last_haptic = get_pattern(cause.primary_cause).to_dict()
+                        except KeyError:
+                            self._last_haptic = None
+                    else:
+                        self._last_haptic = None
+                else:
+                    # SRMR is good — clear persisted cause
+                    self._last_cause = None
+                    self._last_haptic = None
 
-                # Step 4: Haptic pattern lookup
-                if cause.primary_cause is not None and cause.severity > 0.3:
-                    try:
-                        pattern = get_pattern(cause.primary_cause)
-                        result.haptic_pattern = pattern.to_dict()
-                        self._last_haptic = result.haptic_pattern
-                    except KeyError:
-                        pass
-            else:
-                # SRMR is good — clear persisted cause
-                self._last_cause = None
-                self._last_haptic = None
+        # Persisted results (freshly computed above, or carried forward —
+        # Bug 3 fix, now generalized to the gated recompute cadence).
+        result.srmr_score = self._last_srmr_score
+        result.cause = self._last_cause
+        result.haptic_pattern = self._last_haptic
+        result.srmr_age_seconds = (
+            None if self._last_srmr_compute_time is None else timestamp - self._last_srmr_compute_time
+        )
 
         return result
 
@@ -211,6 +268,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Create components
     buf = RingBuffer(window_size=CHUNK_SAMPLES)
+    srmr_buf = RingBuffer(window_size=SRMR_WINDOW_SAMPLES)
     pipeline = AnalysisPipeline(sample_rate=args.sample_rate)
     ws_broadcaster = WSBroadcaster(host="localhost", port=args.ws_port)
     dashboard = DashboardServer(host="localhost", port=args.http_port)
@@ -233,7 +291,11 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Start audio capture
     stream = open_stream(
-        buf, device=args.device, sample_rate=args.sample_rate, block_size=512
+        vad_buffer=buf,
+        srmr_buffer=srmr_buf,
+        device=args.device,
+        sample_rate=args.sample_rate,
+        block_size=512,
     )
     stream.start()
     logger.info("Audio capture started")
@@ -253,7 +315,8 @@ async def _run(args: argparse.Namespace) -> None:
         while not stop.is_set():
             if buf.has_enough_data:
                 chunk = buf.get_window()
-                result = pipeline.process(chunk)
+                srmr_window = srmr_buf.get_window() if srmr_buf.has_enough_data else None
+                result = pipeline.process(chunk, srmr_window=srmr_window)
                 await ws_broadcaster.broadcast(result.to_dict())
             await asyncio.sleep(0.5)  # 500ms interval
     finally:

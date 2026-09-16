@@ -43,29 +43,30 @@ class RoomType(Enum):
 # Calibrated against this repo's own SRMR implementation (docs/adr/ADR-0001)
 # — NOT against SRMRpy or literature values, which use a different scale.
 # Measured with tests/synth.py's synth_speech()/apply_reverb() over a 3s
-# window (ADR-0002) after the anti-aliasing (#4) and windowing (#5) fixes:
+# window (ADR-0002) after the anti-aliasing (#4) and windowing (#5) fixes,
+# averaged over 5 seeds per RT60 condition (mean ± std):
 #
-#   RT60    SRMR
-#   Dry     3.385
-#   0.16s   3.214
-#   0.36s   2.227
-#   0.61s   1.319
-#   1.0s    0.711
+#   RT60    SRMR (mean ± std, n=5)
+#   Dry     3.421 ± 0.082
+#   0.16s   3.194 ± 0.130
+#   0.36s   2.170 ± 0.098
+#   0.61s   1.363 ± 0.067
+#   1.0s    0.791 ± 0.044
 #
-# QUIET_SMALL/MEDIUM_ROOM/REVERBERANT targets are set at the measured score
-# for a representative RT60 in that room type's range (see classify_room),
-# so a typical recording for that room type lands near ratio=1.0. NOISY
-# variants aren't directly measured (this harness only varies RT60, not
-# additive noise) — they keep the same relative discount from their quiet
-# counterpart as the pre-calibration values did (~0.65-0.7x), since SRMR is
-# a reverberation/modulation metric and doesn't react directly to additive
-# noise floor the way it does to RT60.
+# QUIET_SMALL/MEDIUM_ROOM/REVERBERANT targets are set at the measured mean
+# score for a representative RT60 in that room type's range (see
+# classify_room), so a typical recording for that room type lands near
+# ratio=1.0. NOISY variants aren't directly measured (this harness only
+# varies RT60, not additive noise) — they keep the same relative discount
+# from their quiet counterpart as the pre-calibration values did
+# (~0.65-0.7x), since SRMR is a reverberation/modulation metric and
+# doesn't react directly to additive noise floor the way it does to RT60.
 _SRMR_TARGETS = {
     RoomType.QUIET_SMALL: 3.3,  # ~ mean(Dry, 0.16s)
     RoomType.NOISY_SMALL: 2.3,
     RoomType.MEDIUM_ROOM: 2.2,  # ~ 0.36s
     RoomType.NOISY_MEDIUM: 1.4,
-    RoomType.REVERBERANT: 1.0,  # ~ mean(0.61s, 1.0s)
+    RoomType.REVERBERANT: 1.1,  # ~ mean(0.61s, 1.0s)
     RoomType.REVERBERANT_NOISY: 0.7,
 }
 

@@ -155,10 +155,16 @@ class AnalysisPipeline:
         if start_sample >= len(chunk):
             return None
         decay = chunk[start_sample:]
-        # Need at least 300ms of decay (ADR-0003): 50ms was too short to
-        # extrapolate a 60dB decay from without mostly measuring the noise
-        # floor's own slope.
-        if len(decay) < int(self._sample_rate * 0.3):
+        # Need at least 100ms of decay (ADR-0003, revised): the decay tail
+        # only ever comes from what's left of a single 500ms chunk after
+        # the last speech frame, so a 300ms floor made this unreachable
+        # for most utterance-end phases (offset_frame would have to fall
+        # in the chunk's first ~6 of 16 frames). 100ms keeps enough frames
+        # for a T20 fit to be attempted; estimate_rt60_from_decay's own
+        # confidence gate (R^2 < 0.5 is dropped by RoomProfiler.update_rt60)
+        # is what actually filters out decay observations too short or
+        # noisy to trust, rather than an arbitrary length cutoff.
+        if len(decay) < int(self._sample_rate * 0.1):
             return None
         return decay
 

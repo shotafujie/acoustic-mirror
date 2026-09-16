@@ -178,7 +178,7 @@ class TestAnalysisPipeline:
         """
         pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
         # A well-scaled decay: loud plateau, then a clean 0.3s-RT60 decay
-        # for >=300ms (ADR-0003's minimum decay length).
+        # well past the 100ms minimum decay length (ADR-0003).
         plateau_samples = 2880  # 6 frames * 480 samples/frame
         decay_samples = 8000 - plateau_samples  # 320ms
         chunk = np.zeros(8000, dtype=np.float32)
@@ -192,12 +192,51 @@ class TestAnalysisPipeline:
 
         decay = pipeline._extract_decay_segment(chunk, frame_energies)
         assert decay is not None
-        assert len(decay) >= int(SAMPLE_RATE * 0.3)
+        assert len(decay) >= int(SAMPLE_RATE * 0.1)
 
         pipeline._room_profiler.update_rt60(decay)
         profile = pipeline._room_profiler.current_profile
         assert abs(profile.rt60 - 0.3) < 0.1
         assert profile.rt60_confidence > 0.9
+
+    def test_rt60_estimation_is_reachable_across_utterance_end_phase(self):
+        """Regression guard for a reachability bug found via advisor review:
+        the decay tail can only ever come from what's left of a single
+        500ms chunk after the last speech frame (_extract_decay_segment
+        reads from `_prev_chunk`, not the longer SRMR buffer), so an
+        overly long minimum decay length can make RT60 estimation
+        essentially unreachable in practice — a first 300ms floor did
+        (0/16 phases below produced an estimate before it was lowered to
+        100ms). Sweeps where the speech->silence transition falls within
+        the chunk and checks a meaningful fraction still produce an
+        estimate through the real two-call pipeline.process() flow.
+        """
+        frame_size = 480  # 30ms at 16kHz
+        n_frames = 8000 // frame_size
+        hits = 0
+        for offset_frame in range(n_frames):
+            pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
+            silence = np.full(8000, 1e-3, dtype=np.float32)
+            for _ in range(5):
+                pipeline.process(silence)
+
+            speech_end = (offset_frame + 1) * frame_size
+            chunk1 = np.zeros(8000, dtype=np.float32)
+            chunk1[:speech_end] = 0.3
+            if speech_end < 8000:
+                t = np.arange(8000 - speech_end, dtype=np.float64) / SAMPLE_RATE
+                chunk1[speech_end:] = (0.3 * np.exp(-6.908 * t / 0.3)).astype(np.float32)
+
+            pipeline.process(chunk1)
+            pipeline.process(silence)
+            if len(pipeline._room_profiler._rt60_estimates) > 0:
+                hits += 1
+
+        # Not every phase can succeed (some leave too little decay to fit
+        # T20 at all), but at least a third should — this is the real
+        # production path, gated only by the length floor and the R^2
+        # confidence gate, not a hand-built frame_energies list.
+        assert hits >= n_frames // 3
 
     def test_isolated_onset_gate_allows_onset_after_genuine_silence(self):
         """ADR-0003: an onset preceded by real silence is eligible for the

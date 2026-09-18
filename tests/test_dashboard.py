@@ -3,7 +3,6 @@
 import urllib.request
 
 import numpy as np
-
 import pytest
 
 from acoustic_mirror.dashboard.http_server import DashboardServer
@@ -78,8 +77,6 @@ def _wav_bytes(samples, sample_rate=16000, channels=1, sampwidth=2) -> bytes:
     import io
     import wave
 
-    import numpy as np
-
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(channels)
@@ -131,7 +128,6 @@ class TestDiagnoseEndpoint:
     def test_accepts_48k(self, server):
         import json
 
-        import numpy as np
         from scipy.signal import resample_poly
 
         from tests.synth import reverberant_utterances
@@ -144,29 +140,23 @@ class TestDiagnoseEndpoint:
     def test_rejects_too_short(self, server):
         import json
 
-        import numpy as np
-
         err = self._post_error(server, _wav_bytes(np.zeros(16000)))
         assert err.code == 400
         assert "error" in json.loads(err.read())
 
     def test_rejects_stereo(self, server):
-        import numpy as np
-
         assert self._post_error(server, _wav_bytes(np.zeros(16000 * 4), channels=2)).code == 400
 
     def test_rejects_non_16bit(self, server):
-        import numpy as np
-
         assert self._post_error(server, _wav_bytes(np.zeros(16000 * 4), sampwidth=3)).code == 400
 
     def test_rejects_garbage(self, server):
         assert self._post_error(server, b"not a wav file").code == 400
 
     def test_rejects_oversized_body(self, server):
-        from acoustic_mirror.dashboard.http_server import MAX_BODY_BYTES
-
         import http.client
+
+        from acoustic_mirror.dashboard.http_server import MAX_BODY_BYTES
 
         # Rejected from Content-Length alone, before any body is read —
         # so send only the headers.
@@ -178,8 +168,6 @@ class TestDiagnoseEndpoint:
         conn.close()
 
     def test_rejects_over_30_seconds(self, server):
-        import numpy as np
-
         assert self._post_error(server, _wav_bytes(np.zeros(16000 * 31))).code == 413
 
     def test_post_to_other_path_is_404(self, server):
@@ -205,3 +193,46 @@ class TestDiagnoseEndpoint:
         urllib.request.urlopen(f"http://localhost:{server.port}/index.html", timeout=5)
         assert time.monotonic() - start < 0.5
         t.join()
+
+
+class TestDiagnosePage:
+    """dashboard/diagnose.html (docs/adr/ADR-0004)."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self):
+        from pathlib import Path
+
+        d = Path(__file__).parent.parent / "src" / "acoustic_mirror" / "dashboard"
+        self.html = (d / "diagnose.html").read_text()
+        self.index = (d / "index.html").read_text()
+
+    def test_served(self):
+        server = DashboardServer(host="localhost", port=0)
+        server.start()
+        try:
+            for path in ("diagnose.html", "recorder-worklet.js"):
+                assert urllib.request.urlopen(f"http://localhost:{server.port}/{path}").status == 200
+        finally:
+            server.stop()
+
+    def test_browser_processing_forced_off(self):
+        for c in ("echoCancellation: false", "noiseSuppression: false", "autoGainControl: false"):
+            assert c in self.html
+
+    def test_records_raw_pcm_not_mediarecorder(self):
+        assert "audioWorklet.addModule" in self.html
+        assert "MediaRecorder" not in self.html
+
+    def test_lists_microphones(self):
+        assert "enumerateDevices" in self.html
+        assert "deviceId" in self.html
+
+    def test_posts_wav_to_api(self):
+        assert "/api/diagnose" in self.html
+        assert "RIFF" in self.html  # WAV encoded client-side
+
+    def test_index_links_to_diagnose(self):
+        assert 'href="diagnose.html"' in self.index
+
+    def test_diagnose_links_back(self):
+        assert 'href="index.html"' in self.html

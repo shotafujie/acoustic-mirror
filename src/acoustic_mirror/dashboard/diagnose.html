@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Acoustic Mirror — マイク診断</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --card-bg: #16213e;
+    --text: #e0e0e0;
+    --text-dim: #8a8a9a;
+    --green: #00c853;
+    --yellow: #ffd600;
+    --red: #ff1744;
+    --accent: #448aff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1.5rem;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-bottom: 0.4rem;
+    letter-spacing: 0.05em;
+  }
+  .nav { font-size: 0.8rem; margin-bottom: 1.5rem; }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.2rem;
+    max-width: 720px;
+    width: 100%;
+  }
+  .wide { grid-column: 1 / -1; }
+  .card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.2rem;
+  }
+  .card-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.6rem;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  select, button {
+    font: inherit;
+    font-size: 0.9rem;
+    color: var(--text);
+    background: #2a2a4a;
+    border: 1px solid #3a3a5a;
+    border-radius: 8px;
+    padding: 0.45rem 0.7rem;
+  }
+  select { flex: 1 1 14rem; min-width: 0; }
+  button#record {
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .hint { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.7rem; line-height: 1.5; }
+  .progress { height: 6px; background: #2a2a4a; border-radius: 3px; margin-top: 0.8rem; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.1s linear; }
+  .level { height: 4px; background: #2a2a4a; border-radius: 2px; margin-top: 0.4rem; overflow: hidden; }
+  .level-fill { height: 100%; width: 0; background: var(--green); }
+  .status { font-size: 0.85rem; margin-top: 0.6rem; color: var(--text-dim); min-height: 1.2em; }
+  .status.error { color: var(--red); }
+
+  .big-value { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .big-unit { font-size: 0.8rem; color: var(--text-dim); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+  .stat { font-size: 0.8rem; color: var(--text-dim); }
+  .stat-value { font-size: 1.1rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+  .badge {
+    display: inline-block;
+    margin-top: 0.6rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    background: #2a2a4a;
+    font-size: 0.8rem;
+  }
+  .events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 0.5rem; }
+  .event { font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: #2a2a4a; font-variant-numeric: tabular-nums; }
+  .note { font-size: 0.8rem; color: var(--yellow); margin-top: 0.5rem; line-height: 1.5; }
+  .good { color: var(--green); }
+  .warning { color: var(--yellow); }
+  .alert { color: var(--red); }
+
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+  <h1>Acoustic Mirror — マイク診断</h1>
+  <div class="nav"><a href="index.html">← リアルタイムモニターへ</a></div>
+
+  <div class="grid">
+    <div class="card wide">
+      <div class="card-label">録音</div>
+      <div class="controls">
+        <select id="mic" aria-label="マイク"><option>マイクを読み込み中...</option></select>
+        <select id="duration" aria-label="録音時間">
+          <option value="5">5秒</option>
+          <option value="7" selected>7秒</option>
+          <option value="10">10秒</option>
+        </select>
+        <button id="record">録音して診断</button>
+      </div>
+      <div class="level"><div class="level-fill" id="level"></div></div>
+      <div class="progress"><div class="progress-fill" id="progress"></div></div>
+      <div class="status" id="status"></div>
+      <div class="hint">
+        短い文を、文と文の間を1秒ほどあけながら話してください。
+        残響（RT60）は発話が途切れた後の響きの減衰から測ります。
+        ブラウザのエコーキャンセル・ノイズ抑制・自動ゲインは測定のため常にオフにしています。
+      </div>
+    </div>
+
+    <div id="results" class="grid wide" hidden>
+      <div class="card">
+        <div class="card-label">了解度 Intelligibility</div>
+        <div class="big-value" id="ratio">--</div>
+        <div class="big-unit">SRMR ratio（目標値に対する比）</div>
+        <div class="stat" style="margin-top:0.6rem">SRMR <span class="stat-value" id="srmr">--</span></div>
+        <div class="note" id="srmr-note" hidden></div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">室内プロファイル</div>
+        <div class="stats">
+          <div class="stat"><div class="stat-value" id="rt60">--</div>RT60</div>
+          <div class="stat"><div class="stat-value" id="noise-floor">--</div>ノイズフロア</div>
+          <div class="stat"><div class="stat-value" id="e2l">--</div>初期/後期比</div>
+          <div class="stat"><div class="stat-value" id="target">--</div>SRMR目標値</div>
+        </div>
+        <div class="badge" id="room-type">--</div>
+      </div>
+
+      <div class="card wide">
+        <div class="card-label">RT60 の内訳</div>
+        <div class="stat" id="rt60-summary">--</div>
+        <div class="events" id="rt60-events"></div>
+        <div class="note" id="rt60-note" hidden></div>
+      </div>
+
+      <div class="card wide">
+        <div class="card-label">原因分析</div>
+        <div id="cause">--</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const micSelect = document.getElementById('mic');
+const durationSelect = document.getElementById('duration');
+const recordBtn = document.getElementById('record');
+const statusEl = document.getElementById('status');
+const progressEl = document.getElementById('progress');
+const levelEl = document.getElementById('level');
+
+const ROOM_LABELS = {
+  quiet_small: '静かな小部屋',
+  noisy_small: '騒がしい小部屋',
+  medium_room: '中規模の部屋',
+  noisy_medium: '騒がしい中規模の部屋',
+  reverberant: '残響の多い部屋',
+  reverberant_noisy: '残響が多く騒がしい部屋',
+};
+const CAUSE_LABELS = {
+  reverb: '残響', noise: '騒音', articulation: '発音', distance: '距離',
+};
+
+function setStatus(text, isError = false) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle('error', isError);
+}
+
+async function listMics() {
+  // Labels are only exposed after permission has been granted once.
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    setStatus('マイクへのアクセスが許可されていません: ' + e.message, true);
+    return;
+  }
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+  micSelect.innerHTML = '';
+  devices.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `マイク ${i + 1}`;
+    micSelect.appendChild(opt);
+  });
+}
+
+async function record(seconds, deviceId) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      channelCount: 1,
+      // Measurement, not a call: browser DSP would alter the very room/mic
+      // characteristics being measured (docs/adr/ADR-0004).
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+  });
+  const ctx = new AudioContext();
+  try {
+    await ctx.audioWorklet.addModule('recorder-worklet.js');
+    const source = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, 'recorder');
+    const chunks = [];
+    const target = Math.round(seconds * ctx.sampleRate);
+    let collected = 0;
+    await new Promise(resolve => {
+      node.port.onmessage = ev => {
+        if (collected >= target) return;
+        const buf = ev.data;
+        chunks.push(buf);
+        collected += buf.length;
+        let peak = 0;
+        for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i]));
+        levelEl.style.width = Math.min(100, peak * 100) + '%';
+        levelEl.style.background = peak > 0.98 ? 'var(--red)' : 'var(--green)';
+        progressEl.style.width = Math.min(100, (collected / target) * 100) + '%';
+        const remaining = Math.max(0, Math.ceil((target - collected) / ctx.sampleRate));
+        setStatus(`録音中... 残り ${remaining} 秒`);
+        if (collected >= target) resolve();
+      };
+      source.connect(node);
+    });
+    const samples = new Float32Array(target);
+    let offset = 0;
+    for (const c of chunks) {
+      const n = Math.min(c.length, target - offset);
+      samples.set(c.subarray(0, n), offset);
+      offset += n;
+      if (offset >= target) break;
+    }
+    return { samples, sampleRate: ctx.sampleRate };
+  } finally {
+    stream.getTracks().forEach(t => t.stop());
+    await ctx.close();
+    levelEl.style.width = '0';
+  }
+}
+
+function encodeWav(samples, sampleRate) {
+  // 16-bit PCM mono at the context's native rate; the server resamples.
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);            // PCM
+  view.setUint16(22, 1, true);            // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function fmt(v, digits, unit = '') {
+  return v === null || v === undefined ? '判定不能' : v.toFixed(digits) + unit;
+}
+
+function render(d) {
+  const rp = d.room_profile;
+  const defaulted = new Set(d.defaulted_metrics);
+
+  const ratioEl = document.getElementById('ratio');
+  ratioEl.className = 'big-value';
+  if (d.intelligibility_ratio !== undefined) {
+    ratioEl.textContent = d.intelligibility_ratio.toFixed(2);
+    ratioEl.classList.add(d.overall);
+  } else {
+    ratioEl.textContent = '--';
+  }
+  document.getElementById('srmr').textContent = fmt(d.srmr_score, 2);
+  const srmrNote = document.getElementById('srmr-note');
+  srmrNote.hidden = d.srmr_score !== null;
+  srmrNote.textContent = `発話の割合が少ないため了解度は算出していません（発話率 ${(d.speech_ratio * 100).toFixed(0)}%、70%以上が必要）。`;
+
+  document.getElementById('rt60').textContent = fmt(d.rt60.value, 2, 's');
+  document.getElementById('noise-floor').textContent = d.noise_floor_db.toFixed(1) + 'dB';
+  document.getElementById('e2l').textContent = fmt(d.early_to_late_ratio.value_db, 1, 'dB');
+  document.getElementById('target').textContent = rp.srmr_target.toFixed(1);
+  document.getElementById('room-type').textContent =
+    (ROOM_LABELS[rp.room_type] || rp.room_type) + (defaulted.has('rt60') ? '（RT60は既定値で分類）' : '');
+
+  const n = d.rt60.events.length;
+  document.getElementById('rt60-summary').textContent =
+    `採用 ${n} 件 / 棄却 ${d.rt60.rejected_count} 件 — 採用値の70パーセンタイルを RT60 としています`;
+  const eventsEl = document.getElementById('rt60-events');
+  eventsEl.innerHTML = '';
+  [...d.rt60.events].sort((a, b) => a - b).forEach(v => {
+    const s = document.createElement('span');
+    s.className = 'event';
+    s.textContent = v.toFixed(2) + 's';
+    eventsEl.appendChild(s);
+  });
+  const rtNote = document.getElementById('rt60-note');
+  rtNote.hidden = !defaulted.has('rt60');
+  rtNote.textContent = '減衰を3件以上測れなかったため RT60 は出していません。文と文の間を1秒ほどあけて、もう一度試してください。';
+
+  const causeEl = document.getElementById('cause');
+  if (d.primary_cause) {
+    causeEl.innerHTML = '';
+    const name = document.createElement('div');
+    name.className = 'stat-value';
+    name.textContent = CAUSE_LABELS[d.primary_cause.cause] || d.primary_cause.cause;
+    const action = document.createElement('div');
+    action.className = 'stat';
+    action.textContent = d.primary_cause.action;
+    causeEl.append(name, action);
+  } else {
+    causeEl.textContent = d.srmr_score === null ? '了解度が算出できないため判定していません' : '目標値を満たしています';
+  }
+  document.getElementById('results').hidden = false;
+}
+
+recordBtn.addEventListener('click', async () => {
+  recordBtn.disabled = true;
+  progressEl.style.width = '0';
+  try {
+    const { samples, sampleRate } = await record(Number(durationSelect.value), micSelect.value);
+    setStatus('解析中...');
+    const resp = await fetch('/api/diagnose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/wav' },
+      body: encodeWav(samples, sampleRate),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    render(data);
+    setStatus(`診断完了（${data.duration_seconds.toFixed(1)}秒, ${sampleRate}Hz で録音）`);
+  } catch (e) {
+    setStatus('エラー: ' + e.message, true);
+  } finally {
+    recordBtn.disabled = false;
+  }
+});
+
+navigator.mediaDevices.addEventListener('devicechange', listMics);
+listMics();
+</script>
+</body>
+</html>

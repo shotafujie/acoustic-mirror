@@ -2,6 +2,8 @@
 
 import urllib.request
 
+import numpy as np
+
 import pytest
 
 from acoustic_mirror.dashboard.http_server import DashboardServer
@@ -70,3 +72,136 @@ class TestDashboardHTML:
 
     def test_html_contains_haptic_preview(self):
         assert "haptic-bars" in self.html
+
+
+def _wav_bytes(samples, sample_rate=16000, channels=1, sampwidth=2) -> bytes:
+    import io
+    import wave
+
+    import numpy as np
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(sampwidth)
+        w.setframerate(sample_rate)
+        pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2")
+        if channels > 1:
+            pcm = np.repeat(pcm, channels)
+        w.writeframes(pcm.tobytes() if sampwidth == 2 else bytes(len(pcm) * sampwidth))
+    return buf.getvalue()
+
+
+class TestDiagnoseEndpoint:
+    """POST /api/diagnose (docs/adr/ADR-0004)."""
+
+    @pytest.fixture
+    def server(self):
+        s = DashboardServer(host="localhost", port=0)
+        s.start()
+        yield s
+        s.stop()
+
+    def _post(self, server, body: bytes):
+        req = urllib.request.Request(
+            f"http://localhost:{server.port}/api/diagnose",
+            data=body,
+            headers={"Content-Type": "audio/wav"},
+            method="POST",
+        )
+        return urllib.request.urlopen(req, timeout=30)
+
+    def _post_error(self, server, body: bytes) -> urllib.error.HTTPError:
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            self._post(server, body)
+        return exc_info.value
+
+    def test_returns_diagnostic_json(self, server):
+        import json
+
+        from tests.synth import reverberant_utterances
+
+        resp = self._post(server, _wav_bytes(reverberant_utterances(0.6, seed=1)))
+        assert resp.status == 200
+        assert "application/json" in resp.headers["Content-Type"]
+        d = json.loads(resp.read())
+        assert d["type"] == "diagnostic"
+        assert d["rt60"]["value"] is not None
+
+    def test_accepts_48k(self, server):
+        import json
+
+        import numpy as np
+        from scipy.signal import resample_poly
+
+        from tests.synth import reverberant_utterances
+
+        y = resample_poly(reverberant_utterances(0.6, seed=1), 3, 1)
+        d = json.loads(self._post(server, _wav_bytes(y, sample_rate=48000)).read())
+        assert d["duration_seconds"] == pytest.approx(7.0, abs=0.05)
+        assert np.isfinite(d["rt60"]["value"])
+
+    def test_rejects_too_short(self, server):
+        import json
+
+        import numpy as np
+
+        err = self._post_error(server, _wav_bytes(np.zeros(16000)))
+        assert err.code == 400
+        assert "error" in json.loads(err.read())
+
+    def test_rejects_stereo(self, server):
+        import numpy as np
+
+        assert self._post_error(server, _wav_bytes(np.zeros(16000 * 4), channels=2)).code == 400
+
+    def test_rejects_non_16bit(self, server):
+        import numpy as np
+
+        assert self._post_error(server, _wav_bytes(np.zeros(16000 * 4), sampwidth=3)).code == 400
+
+    def test_rejects_garbage(self, server):
+        assert self._post_error(server, b"not a wav file").code == 400
+
+    def test_rejects_oversized_body(self, server):
+        from acoustic_mirror.dashboard.http_server import MAX_BODY_BYTES
+
+        import http.client
+
+        # Rejected from Content-Length alone, before any body is read —
+        # so send only the headers.
+        conn = http.client.HTTPConnection("localhost", server.port, timeout=5)
+        conn.putrequest("POST", "/api/diagnose")
+        conn.putheader("Content-Length", str(MAX_BODY_BYTES + 1))
+        conn.endheaders()
+        assert conn.getresponse().status == 413
+        conn.close()
+
+    def test_rejects_over_30_seconds(self, server):
+        import numpy as np
+
+        assert self._post_error(server, _wav_bytes(np.zeros(16000 * 31))).code == 413
+
+    def test_post_to_other_path_is_404(self, server):
+        req = urllib.request.Request(
+            f"http://localhost:{server.port}/index.html", data=b"x", method="POST"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        assert exc_info.value.code == 404
+
+    def test_static_served_while_diagnosing(self, server):
+        """ThreadingHTTPServer: a slow diagnose must not block page loads."""
+        import threading
+        import time
+
+        from tests.synth import reverberant_utterances
+
+        body = _wav_bytes(np.concatenate([reverberant_utterances(0.6, seed=s) for s in (1, 2, 3, 4)]))
+        t = threading.Thread(target=lambda: self._post(server, body))
+        t.start()
+        time.sleep(0.05)
+        start = time.monotonic()
+        urllib.request.urlopen(f"http://localhost:{server.port}/index.html", timeout=5)
+        assert time.monotonic() - start < 0.5
+        t.join()

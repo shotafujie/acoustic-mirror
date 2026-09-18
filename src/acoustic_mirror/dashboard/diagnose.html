@@ -16,6 +16,7 @@
     --accent: #448aff;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: var(--bg);
@@ -193,6 +194,7 @@ function setStatus(text, isError = false) {
 
 async function listMics() {
   // Labels are only exposed after permission has been granted once.
+  setStatus('ブラウザのマイク許可ダイアログで「許可」を選んでください');
   try {
     const s = await navigator.mediaDevices.getUserMedia({ audio: true });
     s.getTracks().forEach(t => t.stop());
@@ -208,6 +210,7 @@ async function listMics() {
     opt.textContent = d.label || `マイク ${i + 1}`;
     micSelect.appendChild(opt);
   });
+  setStatus('');
 }
 
 async function record(seconds, deviceId) {

@@ -31,6 +31,16 @@ class TestHTTPServer:
         finally:
             server.stop()
 
+    def test_static_files_are_revalidated(self):
+        """Stale cached pages hid a fix during manual Chrome testing."""
+        server = DashboardServer(host="localhost", port=0)
+        server.start()
+        try:
+            resp = urllib.request.urlopen(f"http://localhost:{server.port}/diagnose.html")
+            assert resp.headers.get("Cache-Control") == "no-cache"
+        finally:
+            server.stop()
+
     def test_404_for_unknown_path(self):
         server = DashboardServer(host="localhost", port=0)
         server.start()
@@ -236,3 +246,8 @@ class TestDiagnosePage:
 
     def test_diagnose_links_back(self):
         assert 'href="index.html"' in self.html
+
+    def test_hidden_attribute_beats_grid_display(self):
+        """#results uses class="grid" (display:grid), which overrides the UA
+        [hidden] rule unless restated — found by opening the page in Chrome."""
+        assert "[hidden] { display: none !important; }" in self.html

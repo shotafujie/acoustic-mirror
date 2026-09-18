@@ -61,6 +61,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # suppress request logging
 
+    def end_headers(self):
+        # Revalidate every load so an updated page isn't masked by the
+        # browser's Last-Modified heuristic cache.
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)

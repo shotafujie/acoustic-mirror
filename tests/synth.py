@@ -34,3 +34,47 @@ def apply_reverb(speech: np.ndarray, rt60: float, sample_rate: int = SAMPLE_RATE
     if peak > 0:
         wet = wet / peak
     return wet.astype(np.float32)
+
+
+def synth_utterances(
+    dur: float = 7.0,
+    burst: float = 0.3,
+    gap: float = 0.7,
+    sample_rate: int = SAMPLE_RATE,
+    seed: int = 1,
+) -> np.ndarray:
+    """Noise bursts separated by silences of ~`gap` seconds (±20%).
+
+    Unlike synth_speech (continuous modulated noise), this has genuine
+    pauses between "utterances" so free reverberant decays can be observed —
+    what the batch diagnostic's multi-event RT60 estimate needs (ADR-0004).
+    """
+    rng = np.random.default_rng(seed)
+    x = np.zeros(int(sample_rate * dur))
+    t = 0.2
+    while t + burst < dur:
+        a, b = int(t * sample_rate), int((t + burst) * sample_rate)
+        x[a:b] = 0.3 * rng.standard_normal(b - a)
+        t += burst + gap * rng.uniform(0.8, 1.2)
+    return x.astype(np.float32)
+
+
+def reverberant_utterances(
+    rt60: float,
+    gap: float = 0.7,
+    noise_db: float = -60.0,
+    sample_rate: int = SAMPLE_RATE,
+    seed: int = 1,
+) -> np.ndarray:
+    """synth_utterances convolved with a synthetic RIR, peak-normalized, plus
+    a white-noise floor at `noise_db` dBFS (ADR-0004's validity harness).
+
+    The RIR is 1.5x RT60 long (min 1s) so its own truncation stays below
+    the T20 fit range even for long RT60.
+    """
+    x = synth_utterances(gap=gap, sample_rate=sample_rate, seed=seed)
+    rir = synth_rir(rt60, sample_rate=sample_rate, dur=max(1.0, rt60 * 1.5), seed=seed)
+    y = np.convolve(x, rir)[: len(x)]
+    y = y / np.max(np.abs(y))
+    y = y + 10 ** (noise_db / 20) * np.random.default_rng(99).standard_normal(len(y))
+    return y.astype(np.float32)

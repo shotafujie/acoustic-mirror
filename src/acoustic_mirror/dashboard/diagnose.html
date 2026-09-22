@@ -109,7 +109,7 @@
 </head>
 <body>
   <h1>Acoustic Mirror — マイク診断</h1>
-  <div class="nav"><a href="index.html">← リアルタイムモニターへ</a></div>
+  <div class="nav"><a id="nav-link" href="index.html">← リアルタイムモニターへ</a></div>
 
   <div class="grid">
     <div class="card wide">
@@ -168,6 +168,9 @@
   </div>
 
 <script>
+// Keep an explicit ?ws_port= override when moving to the other page.
+document.getElementById('nav-link').href = 'index.html' + window.location.search;
+
 const micSelect = document.getElementById('mic');
 const durationSelect = document.getElementById('duration');
 const recordBtn = document.getElementById('record');

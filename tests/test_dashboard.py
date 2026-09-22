@@ -1,5 +1,6 @@
 """Sprint 9: Dashboard HTTP server and HTML tests."""
 
+import json
 import urllib.request
 
 import numpy as np
@@ -41,6 +42,27 @@ class TestHTTPServer:
         finally:
             server.stop()
 
+    def test_config_reports_the_ws_port(self):
+        """The page cannot guess the WS port; the server is what knows it."""
+        server = DashboardServer(host="localhost", port=0, ws_port=8769)
+        server.start()
+        try:
+            resp = urllib.request.urlopen(f"http://localhost:{server.port}/api/config")
+            assert resp.status == 200
+            assert "application/json" in resp.headers.get("Content-Type", "")
+            assert json.loads(resp.read())["ws_port"] == 8769
+        finally:
+            server.stop()
+
+    def test_config_reports_null_when_no_ws_port_is_wired(self):
+        server = DashboardServer(host="localhost", port=0)
+        server.start()
+        try:
+            resp = urllib.request.urlopen(f"http://localhost:{server.port}/api/config")
+            assert json.loads(resp.read())["ws_port"] is None
+        finally:
+            server.stop()
+
     def test_404_for_unknown_path(self):
         server = DashboardServer(host="localhost", port=0)
         server.start()
@@ -64,6 +86,12 @@ class TestDashboardHTML:
     def test_html_contains_websocket_connection(self):
         assert "WebSocket" in self.html
         assert "ws://localhost" in self.html
+
+    def test_ws_port_falls_back_to_the_server_config(self):
+        """Opening the dashboard without ?ws_port must still connect: the
+        8765 literal is only a last resort, not the working default."""
+        assert "/api/config" in self.html
+        assert "ws_port" in self.html
 
     def test_html_contains_intelligibility_ring(self):
         assert "ring" in self.html
@@ -246,6 +274,12 @@ class TestDiagnosePage:
 
     def test_diagnose_links_back(self):
         assert 'href="index.html"' in self.html
+
+    def test_nav_links_carry_the_query_string(self):
+        """An explicit ?ws_port= override was dropped when moving between
+        the two pages, which showed up as a stuck "\u5207\u65ad" banner."""
+        for page in (self.html, self.index):
+            assert "location.search" in page
 
     def test_hidden_attribute_beats_grid_display(self):
         """#results uses class="grid" (display:grid), which overrides the UA

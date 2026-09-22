@@ -300,11 +300,14 @@ async def _run(args: argparse.Namespace) -> None:
     srmr_buf = RingBuffer(window_size=SRMR_WINDOW_SAMPLES)
     pipeline = AnalysisPipeline(sample_rate=args.sample_rate)
     ws_broadcaster = WSBroadcaster(host="localhost", port=args.ws_port)
-    dashboard = DashboardServer(host="localhost", port=args.http_port)
 
-    # Start servers
-    dashboard.start()
+    # The broadcaster starts first so the dashboard can serve its real port
+    # to the page (GET /api/config) instead of the page guessing one.
     await ws_broadcaster.start()
+    dashboard = DashboardServer(
+        host="localhost", port=args.http_port, ws_port=ws_broadcaster.port
+    )
+    dashboard.start()
 
     logger.info(
         f"Dashboard: http://localhost:{dashboard.port}?ws_port={ws_broadcaster.port}"

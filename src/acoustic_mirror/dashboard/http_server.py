@@ -2,7 +2,9 @@
 
 Static files are served from this directory. POST /api/diagnose takes a
 mono 16-bit PCM WAV recorded in the browser and returns the batch
-diagnostic as JSON (docs/adr/ADR-0004).
+diagnostic as JSON (docs/adr/ADR-0004). GET /api/config tells the page
+which port the WebSocket broadcaster is on, so the real-time dashboard
+connects correctly however it was opened.
 """
 
 import io
@@ -55,7 +57,8 @@ def _decode_wav(body: bytes) -> tuple[np.ndarray, int]:
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, **kwargs):
+    def __init__(self, *args, directory=None, ws_port=None, **kwargs):
+        self._ws_port = ws_port
         super().__init__(*args, directory=str(directory), **kwargs)
 
     def log_message(self, format, *args):
@@ -74,6 +77,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/api/config":
+            self._send_json(200, {"ws_port": self._ws_port})
+            return
+        super().do_GET()
 
     def do_POST(self):
         if self.path != "/api/diagnose":
@@ -99,9 +108,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 class DashboardServer:
-    def __init__(self, host: str = "localhost", port: int = 8080) -> None:
+    def __init__(
+        self, host: str = "localhost", port: int = 8080, ws_port: int | None = None
+    ) -> None:
         self._host = host
         self._port = port
+        self._ws_port = ws_port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -112,7 +124,9 @@ class DashboardServer:
         return self._port
 
     def start(self) -> None:
-        handler = partial(DashboardHandler, directory=_DASHBOARD_DIR)
+        handler = partial(
+            DashboardHandler, directory=_DASHBOARD_DIR, ws_port=self._ws_port
+        )
         self._server = ThreadingHTTPServer((self._host, self._port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

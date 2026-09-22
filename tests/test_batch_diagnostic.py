@@ -19,7 +19,6 @@ from acoustic_mirror.analysis.speech_detector import frame_energy_db
 from acoustic_mirror.analysis.srmr import SRMRProcessor
 from tests.synth import (
     SAMPLE_RATE,
-    apply_reverb,
     reverberant_speech,
     reverberant_utterances,
     speech_utterances,
@@ -227,16 +226,20 @@ class TestDecayEventGating:
             for start, end in find_decay_events(y, SAMPLE_RATE):
                 assert (end - start) / SAMPLE_RATE >= 0.1
 
-    def test_sub_100ms_decay_is_not_an_event(self):
-        """A burst whose decay reaches the floor in ~60ms yields no event."""
+    def _decaying_bursts(self, decay_seconds: float) -> np.ndarray:
         rng = np.random.default_rng(0)
-        y = (1e-3 * rng.standard_normal(5 * SAMPLE_RATE)).astype(np.float32)
+        y = 1e-3 * rng.standard_normal(5 * SAMPLE_RATE)
         for t in (0.5, 1.5, 2.5, 3.5):
             a = int(t * SAMPLE_RATE)
-            n = int(0.06 * SAMPLE_RATE)
-            y[a : a + n] += (0.3 * rng.standard_normal(n) * np.linspace(1, 0, n)).astype(np.float32)
-        for start, end in find_decay_events(y, SAMPLE_RATE):
-            assert (end - start) / SAMPLE_RATE >= 0.1
+            n = int(decay_seconds * SAMPLE_RATE)
+            y[a : a + n] += 0.3 * rng.standard_normal(n) * np.exp(-6.9 * np.linspace(0, 1, n))
+        return y.astype(np.float32)
+
+    def test_sub_100ms_decay_is_not_an_event(self):
+        """Decays too short to fit are dropped — and the same signal with a
+        longer decay is picked up, so this cannot pass by finding nothing."""
+        assert find_decay_events(self._decaying_bursts(0.06), SAMPLE_RATE) == []
+        assert find_decay_events(self._decaying_bursts(0.4), SAMPLE_RATE) != []
 
 
 class TestNoiseFloorAndSpeech:
@@ -261,6 +264,18 @@ class TestNoiseFloorAndSpeech:
         loud_first = np.concatenate([y[: 2 * SAMPLE_RATE], y]).astype(np.float32)
         result = diagnose(loud_first, SAMPLE_RATE)
         assert result.noise_floor_db == pytest.approx(self._expected_floor(loud_first))
+
+    def test_speech_threshold_is_the_one_speech_detector_uses(self):
+        """Promise D2: "the same margin as SpeechDetector". Two independent
+        literals that happen to both be 6.0 do not keep that promise —
+        changing SpeechDetector's default has to be felt here."""
+        import inspect
+
+        from acoustic_mirror.analysis.batch_diagnostic import _SPEECH_THRESHOLD_DB
+        from acoustic_mirror.analysis.speech_detector import SpeechDetector
+
+        default = inspect.signature(SpeechDetector.__init__).parameters["threshold_db"].default
+        assert _SPEECH_THRESHOLD_DB == default
 
     def test_speech_seconds_is_the_speech_frames_duration(self):
         y = reverberant_utterances(0.3, gap=0.7, seed=1)
@@ -354,13 +369,17 @@ class TestNoOverallScore:
         import re
 
         src = pathlib.Path(__file__).resolve().parents[1] / "src"
+        # MicrophoneTest's rToMos() is JavaScript, so scanning only Python
+        # would look everywhere except where it would actually land.
+        pattern = re.compile(r"\br?_?to_?mos\b|\bmos\b|overall[_ ]?score", re.IGNORECASE)
         hits = [
-            f"{path.relative_to(src)}:{i}"
-            for path in src.rglob("*.py")
+            f"{path.relative_to(src)}:{i}: {line.strip()}"
+            for path in src.rglob("*")
+            if path.suffix in (".py", ".js", ".html")
             for i, line in enumerate(path.read_text().splitlines(), 1)
-            if re.search(r"\brtomos\b|\bmos_score\b|\bto_mos\b", line, re.IGNORECASE)
+            if pattern.search(line)
         ]
-        assert hits == [], f"MOS conversion reintroduced (ADR-0004 rejects it): {hits}"
+        assert hits == [], f"MOS-style overall score reintroduced (ADR-0004 rejects it): {hits}"
 
 
 class TestSRMRGateJustification:
@@ -398,15 +417,25 @@ class TestSRMRGateJustification:
         assert max(ratios) >= 0.7, f"no protocol clears the old gate: {ratios}"
 
     @pytest.mark.parametrize("burst,gap,dur", PROTOCOLS)
-    def test_pauses_barely_move_srmr(self, burst, gap, dur):
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_pauses_barely_move_srmr(self, burst, gap, dur, seed):
         """The core claim behind the revision: the silence the ratio gate
         was protecting against is not actually corrupting the score.
 
-        Reference is the same room heard without pauses. Measured deviation
-        across protocols and seeds was at most 5.5%.
+        The reference is the same clip with the pauses taken out — same
+        room (same RIR seed), same bursts, same code path, `gap=0`. Only
+        the pause length differs, so the deviation is attributable to it.
+
+        Measured worst case across these 5 protocols x 3 seeds: 7.4%.
+
+        The reference is not silence-free: synth_speech's 4Hz envelope has
+        nulls deep enough to read as silence, so even `gap=0` lands at a
+        speech ratio of 0.55-0.89. A cleaner reference is not available
+        from this generator, which is why the bound is 10% and not tighter.
         """
-        reference = self._srmr(apply_reverb(synth_speech(dur=7.0), self.TRUE_RT60))
-        score = diagnose(self._clip(burst, gap, dur), SAMPLE_RATE).srmr_score
+        reference = diagnose(self._clip(burst, 0.0, dur, seed), SAMPLE_RATE).srmr_score
+        score = diagnose(self._clip(burst, gap, dur, seed), SAMPLE_RATE).srmr_score
+        assert reference is not None
         assert abs(score - reference) / reference <= 0.10
 
     def test_densest_3s_window_is_the_noisier_alternative(self):

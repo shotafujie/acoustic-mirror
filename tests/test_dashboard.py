@@ -103,6 +103,15 @@ class TestDashboardHTML:
         assert "noise-floor" in self.html
         assert "drr" in self.html
 
+    def test_rt60_is_not_drawn_without_confidence(self):
+        """ADR-0005 / issue #13: an unmeasured room must not render as a
+        0.20s room. Like the other checks in this class this only reads the
+        page's source — no test executes this JavaScript (the same gap as
+        B4/B6 in the ADR-0004 verification), so it pins that the guard is
+        present, not that it works.
+        """
+        assert "rp.rt60_confidence > 0 ? rp.rt60.toFixed(2) : '--'" in self.html
+
     def test_html_contains_cause_card(self):
         assert "cause-content" in self.html
         assert "cause-name" in self.html

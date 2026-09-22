@@ -276,7 +276,11 @@ function updateRing(ratio) {
 function updateRoomProfile(data) {
   if (!data.room_profile) return;
   const rp = data.room_profile;
-  document.getElementById('rt60').textContent = rp.rt60.toFixed(2);
+  // ADR-0005: confidence 0 means no room was measured — the payload still
+  // carries a default RT60 so classify_room has a number, but showing it
+  // would be indistinguishable from having measured a 0.20s room.
+  document.getElementById('rt60').textContent =
+    rp.rt60_confidence > 0 ? rp.rt60.toFixed(2) : '--';
   document.getElementById('noise-floor').textContent = rp.noise_floor_db.toFixed(1);
   document.getElementById('drr').textContent = rp.early_to_late_ratio_db.toFixed(1);
   document.getElementById('srmr-target').textContent = rp.srmr_target.toFixed(1);

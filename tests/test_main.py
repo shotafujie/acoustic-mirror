@@ -3,6 +3,9 @@
 import numpy as np
 import pytest
 
+from tests.synth import reverberant_utterances
+
+from acoustic_mirror.analysis.rolling_rt60 import RollingRT60Estimator
 from acoustic_mirror.main import AnalysisPipeline, AnalysisResult, should_recompute_srmr
 
 SAMPLE_RATE = 16000
@@ -111,9 +114,7 @@ class TestAnalysisPipeline:
             pipeline.process(silence)
         # Simulate high-noise room
         pipeline._room_profiler.update_noise_floor(-25.0)
-        pipeline._room_profiler.update_rt60(
-            np.exp(-np.arange(8000, dtype=np.float32) / 1600)  # ~0.5s RT60
-        )
+        pipeline._room_profiler.set_rt60(0.5, confidence=0.9)
         # Feed speech-like signal, sustained long enough for the recent-
         # speech-ratio gate (history maxlen=6) to clear the silence priming
         rng = np.random.default_rng(42)
@@ -135,9 +136,7 @@ class TestAnalysisPipeline:
             pipeline.process(silence)
         # Force low SRMR target so cause is triggered
         pipeline._room_profiler.update_noise_floor(-25.0)
-        pipeline._room_profiler.update_rt60(
-            np.exp(-np.arange(8000, dtype=np.float32) / 1600)
-        )
+        pipeline._room_profiler.set_rt60(0.5, confidence=0.9)
         # Feed speech, sustained long enough for the gate to fire (with a
         # full SRMR window)
         window = _srmr_window_from(speech_like_chunk)
@@ -165,79 +164,84 @@ class TestAnalysisPipeline:
             result_silence = pipeline.process(silence)
             assert result_silence.srmr_score == result_speech.srmr_score
 
-    def test_rt60_uses_prev_chunk_decay(self):
-        """Bug 1+2: RT60 estimation uses the decay tail extracted from the
-        previous chunk. Exercises _extract_decay_segment + update_rt60
-        directly with a hand-built frame_energies list (rather than
-        driving it through VAD threshold physics on a synthetic chunk,
-        which — at the very low absolute noise floors this scaffold uses
-        for "silence" — collides with the RT60 estimator's own numerical
-        floor for near-silent samples; that interaction is a test-signal
-        artifact of this scaffold, not a real constraint on production
-        audio scaled to a normal noise floor).
-        """
+    def test_rt60_comes_from_the_rolling_window(self):
+        """ADR-0005 replaced the speech→silence trigger (and the hand-built
+        frame_energies the old version of this test needed) with decay
+        events found in the 3s SRMR window. Drives the real
+        pipeline.process() flow on a room of known RT60."""
         pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
-        # A well-scaled decay: loud plateau, then a clean 0.3s-RT60 decay
-        # well past the 100ms minimum decay length (ADR-0003).
-        plateau_samples = 2880  # 6 frames * 480 samples/frame
-        decay_samples = 8000 - plateau_samples  # 320ms
-        chunk = np.zeros(8000, dtype=np.float32)
-        chunk[:plateau_samples] = 0.3
-        t = np.arange(decay_samples, dtype=np.float64) / SAMPLE_RATE
-        chunk[plateau_samples:] = (0.3 * np.exp(-6.908 * t / 0.3)).astype(np.float32)
+        clip = reverberant_utterances(0.6, gap=1.2, seed=1)
 
-        # frame_energies as VAD would report them for this chunk: loud for
-        # the plateau, then dropping below any reasonable threshold.
-        frame_energies = [-10.5] * 6 + [-90.0] * (decay_samples // 480)
+        window_samples = 3 * SAMPLE_RATE
+        for end in range(8000, len(clip) + 1, 8000):
+            chunk = clip[end - 8000 : end].astype(np.float32)
+            start = max(0, end - window_samples)
+            srmr_window = (
+                clip[start:end].astype(np.float32) if end - start == window_samples else None
+            )
+            pipeline.process(chunk, srmr_window=srmr_window)
 
-        decay = pipeline._extract_decay_segment(chunk, frame_energies)
-        assert decay is not None
-        assert len(decay) >= int(SAMPLE_RATE * 0.1)
-
-        pipeline._room_profiler.update_rt60(decay)
         profile = pipeline._room_profiler.current_profile
-        assert abs(profile.rt60 - 0.3) < 0.1
-        assert profile.rt60_confidence > 0.9
+        assert abs(profile.rt60 - 0.6) / 0.6 <= 0.15
+        assert profile.rt60_confidence > 0.5
 
-    def test_rt60_estimation_is_reachable_across_utterance_end_phase(self):
-        """Regression guard for a reachability bug found via advisor review:
-        the decay tail can only ever come from what's left of a single
-        500ms chunk after the last speech frame (_extract_decay_segment
-        reads from `_prev_chunk`, not the longer SRMR buffer), so an
-        overly long minimum decay length can make RT60 estimation
-        essentially unreachable in practice — a first 300ms floor did
-        (0/16 phases below produced an estimate before it was lowered to
-        100ms). Sweeps where the speech->silence transition falls within
-        the chunk and checks a meaningful fraction still produce an
-        estimate through the real two-call pipeline.process() flow.
+    def test_the_pipeline_positions_the_window_correctly_in_the_stream(self):
+        """The estimator deduplicates by an event's absolute position, so the
+        `window_start` the pipeline computes has to be right. Nothing was
+        checking the arithmetic: the independent verification of ADR-0005
+        forced it to a constant 0 and all 312 tests still passed.
+
+        Driving the estimator directly with known offsets gives the count
+        the pipeline must match; a wrong offset re-adopts decays it has
+        already seen.
         """
-        frame_size = 480  # 30ms at 16kHz
-        n_frames = 8000 // frame_size
-        hits = 0
-        for offset_frame in range(n_frames):
+        clip = reverberant_utterances(0.6, gap=1.2, seed=1)
+        window_samples = 3 * SAMPLE_RATE
+
+        direct = RollingRT60Estimator(sample_rate=SAMPLE_RATE)
+        pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
+        for end in range(8000, len(clip) + 1, 8000):
+            start = max(0, end - window_samples)
+            window = (
+                clip[start:end].astype(np.float32) if end - start == window_samples else None
+            )
+            if window is not None:
+                direct.push(window, window_start=start)
+            pipeline.process(clip[end - 8000 : end].astype(np.float32), srmr_window=window)
+
+        assert pipeline._rt60_estimator.event_count == direct.event_count
+        assert direct.event_count > 0, "nothing was adopted; the test is vacuous"
+
+    def test_rt60_does_not_depend_on_where_the_utterance_ends_in_a_chunk(self):
+        """Successor to the reachability guard from ADR-0003's advisor pass.
+        The old trigger could only read the decay left over in one 500ms
+        chunk after the last speech frame, so whether an estimate happened
+        at all depended on the phase of the utterance within the chunk (a
+        300ms floor once made 0 of 16 phases work). The rolling window has
+        no such dependency: the same room is measured at every phase.
+        """
+        clip = reverberant_utterances(0.6, gap=1.2, seed=1)
+        window_samples = 3 * SAMPLE_RATE
+        reported = []
+
+        for phase in range(0, 8000, 1000):  # shift the chunk grid within a chunk
             pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
-            silence = np.full(8000, 1e-3, dtype=np.float32)
-            for _ in range(5):
-                pipeline.process(silence)
+            shifted = clip[phase:]
+            for end in range(8000, len(shifted) + 1, 8000):
+                chunk = shifted[end - 8000 : end].astype(np.float32)
+                start = max(0, end - window_samples)
+                srmr_window = (
+                    shifted[start:end].astype(np.float32)
+                    if end - start == window_samples
+                    else None
+                )
+                pipeline.process(chunk, srmr_window=srmr_window)
+            profile = pipeline._room_profiler.current_profile
+            if profile.rt60_confidence > 0:
+                reported.append(profile.rt60)
 
-            speech_end = (offset_frame + 1) * frame_size
-            chunk1 = np.zeros(8000, dtype=np.float32)
-            chunk1[:speech_end] = 0.3
-            if speech_end < 8000:
-                t = np.arange(8000 - speech_end, dtype=np.float64) / SAMPLE_RATE
-                chunk1[speech_end:] = (0.3 * np.exp(-6.908 * t / 0.3)).astype(np.float32)
-
-            pipeline.process(chunk1)
-            pipeline.process(silence)
-            if len(pipeline._room_profiler._rt60_estimates) > 0:
-                hits += 1
-
-        # Not every phase can succeed (some leave too little decay to fit
-        # T20 at all), but at least a third should — this is the real
-        # production path, gated only by the length floor and the R^2
-        # confidence gate, not a hand-built frame_energies list.
-        assert hits >= n_frames // 3
-
+        assert len(reported) == 8, "every phase should produce an estimate"
+        assert all(abs(v - 0.6) / 0.6 <= 0.15 for v in reported)
     def test_isolated_onset_gate_allows_onset_after_genuine_silence(self):
         """ADR-0003: an onset preceded by real silence is eligible for the
         early-to-late ratio update."""

@@ -8,6 +8,7 @@ from acoustic_mirror.analysis.srmr import (
     SRMRProcessor,
     compute_modulation_energy,
 )
+from tests.synth import apply_reverb, synth_speech
 
 SAMPLE_RATE = 16000
 
@@ -52,7 +53,83 @@ class TestGammatoneFilterbank:
         assert np.max(np.abs(output)) < 1e-6
 
 
+def _compute_modulation_energy_rectangular_window(envelopes: np.ndarray, sample_rate: int, n_mod_bands: int = 8) -> np.ndarray:
+    """Test-local reimplementation of compute_modulation_energy without
+    the Hann window (issue #5's "before" state), used only as a
+    comparison baseline to verify the window actually reduces leakage —
+    not a production code path.
+    """
+    from scipy.signal import decimate
+
+    from acoustic_mirror.analysis.srmr import _modulation_filterbank_centers
+
+    mod_centers = _modulation_filterbank_centers(n_mod_bands)
+    downsample_factor = max(1, sample_rate // 400)
+    env_ds = decimate(envelopes, downsample_factor, ftype="fir", zero_phase=True, axis=1)
+    ds_rate = sample_rate / downsample_factor
+    n_fft = env_ds.shape[1]
+    env_ds = env_ds - np.mean(env_ds, axis=1, keepdims=True)
+    spectrum = np.abs(np.fft.rfft(env_ds, axis=1)) ** 2  # no window
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / ds_rate)
+    energy = np.zeros((envelopes.shape[0], n_mod_bands))
+    for b in range(n_mod_bands):
+        cf = mod_centers[b]
+        bw = cf / 2.0
+        mask = (freqs >= cf - bw / 2) & (freqs < cf + bw / 2)
+        energy[:, b] = np.sum(spectrum[:, mask], axis=1)
+    return energy
+
+
 class TestModulationEnergy:
+    def test_hann_window_reduces_spectral_leakage_into_high_mod_bands(self):
+        """Issue #5: without a window, a strong low-modulation envelope
+        component not aligned to an FFT bin leaks into the high-modulation
+        (denominator) bands via spectral leakage, systematically lowering
+        SRMR. Compares the production function (which applies a Hann
+        window) against a rectangular-window reference reimplemented
+        locally in this test (see
+        _compute_modulation_energy_rectangular_window above).
+        """
+        n_samples = 8000
+        t = np.arange(n_samples, dtype=np.float64) / SAMPLE_RATE
+        # 4.3Hz: strong low-modulation content, deliberately not aligned to
+        # an FFT bin (2Hz spacing) so its energy would otherwise leak.
+        env = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 4.3 * t), (23, 1))
+
+        energy_windowed = compute_modulation_energy(env, SAMPLE_RATE)
+        energy_rectangular = _compute_modulation_energy_rectangular_window(env, SAMPLE_RATE)
+
+        high_mod_leak_windowed = energy_windowed[:, 4:].sum() / energy_windowed.sum()
+        high_mod_leak_rectangular = energy_rectangular[:, 4:].sum() / energy_rectangular.sum()
+
+        assert high_mod_leak_windowed < 0.1 * high_mod_leak_rectangular
+
+    def test_high_frequency_envelope_content_does_not_alias_into_modulation_bands(self):
+        """Issue #4: naive striding (no anti-alias filter) folds envelope
+        content above the downsampled Nyquist (~200Hz) back into the
+        modulation bands. A 300Hz envelope oscillation aliases to exactly
+        100Hz (the highest modulation band) under naive ::40 striding at
+        16kHz; decimate's built-in lowpass should suppress it instead.
+
+        Compares the aliasing probe's total captured energy against a
+        genuine 4Hz-modulated envelope of the same amplitude, rather than
+        against itself, since a pure single-tone probe trivially
+        concentrates 100% of whatever energy survives filtering in one
+        band regardless of how effective the anti-alias filter is.
+        """
+        n_samples = 8000
+        t = np.arange(n_samples, dtype=np.float64) / SAMPLE_RATE
+        alias_probe = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 300 * t), (23, 1))
+        genuine_modulation = np.tile(1.0 + 0.9 * np.sin(2 * np.pi * 4 * t), (23, 1))
+
+        probe_energy = compute_modulation_energy(alias_probe, SAMPLE_RATE).sum()
+        reference_energy = compute_modulation_energy(genuine_modulation, SAMPLE_RATE).sum()
+
+        # With anti-aliasing, the leaked energy from a 300Hz probe should
+        # be negligible next to genuine low-modulation content, not equal
+        # to it (naive striding leaks the full probe amplitude: ratio 1.0).
+        assert probe_energy < 0.01 * reference_energy
+
     def test_output_shape(self):
         """Modulation energy matrix should be (n_channels, n_mod_bands)."""
         rng = np.random.default_rng(42)
@@ -124,3 +201,26 @@ class TestSRMR:
         proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
         result = proc.process(speech_like_chunk, is_speech=True)
         assert result.energy.shape == (23, 8)
+
+
+class TestSRMRValidityAgainstSyntheticReverb:
+    """Issue #10: the indicator must be monotonic in a known, controllable
+    reverberation amount. Uses a 3s window (SRMR is a whole-utterance
+    metric — see ADR-0002) with synthetic exponential-decay RIRs at known
+    RT60 values.
+    """
+
+    RT60_CONDITIONS = [0.16, 0.36, 0.61, 1.0]
+
+    def test_srmr_decreases_as_rt60_increases(self):
+        speech = synth_speech(dur=3.0, sample_rate=SAMPLE_RATE)
+        proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
+        dry_score = proc.process(speech, is_speech=True).srmr_score
+
+        scores = [dry_score]
+        for rt60 in self.RT60_CONDITIONS:
+            wet = apply_reverb(speech, rt60, sample_rate=SAMPLE_RATE)
+            proc = SRMRProcessor(sample_rate=SAMPLE_RATE)
+            scores.append(proc.process(wet, is_speech=True).srmr_score)
+
+        assert scores == sorted(scores, reverse=True)

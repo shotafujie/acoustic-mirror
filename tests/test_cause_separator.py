@@ -12,7 +12,7 @@ def _profile(rt60=0.2, noise=-50.0, drr=10.0) -> RoomProfile:
     return RoomProfile(
         rt60=rt60,
         noise_floor_db=noise,
-        drr_db=drr,
+        early_to_late_ratio_db=drr,
         room_type=room_type,
         srmr_target=room_type.srmr_target,
     )

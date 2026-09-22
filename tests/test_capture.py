@@ -13,43 +13,61 @@ class TestAudioCapture:
     @patch("acoustic_mirror.audio.capture.sd")
     def test_open_stream_returns_input_stream(self, mock_sd):
         mock_sd.InputStream.return_value = MagicMock()
-        buf = RingBuffer(window_size=8000)
-        stream = open_stream(buf, sample_rate=16000)
+        vad_buf = RingBuffer(window_size=8000)
+        srmr_buf = RingBuffer(window_size=48000)
+        stream = open_stream(vad_buf, srmr_buf, sample_rate=16000)
         mock_sd.InputStream.assert_called_once()
         assert stream is not None
 
     @patch("acoustic_mirror.audio.capture.sd")
     def test_stream_uses_correct_sample_rate(self, mock_sd):
         mock_sd.InputStream.return_value = MagicMock()
-        buf = RingBuffer(window_size=8000)
-        open_stream(buf, sample_rate=16000)
+        vad_buf = RingBuffer(window_size=8000)
+        srmr_buf = RingBuffer(window_size=48000)
+        open_stream(vad_buf, srmr_buf, sample_rate=16000)
         call_kwargs = mock_sd.InputStream.call_args[1]
         assert call_kwargs["samplerate"] == 16000
 
     @patch("acoustic_mirror.audio.capture.sd")
     def test_stream_is_mono(self, mock_sd):
         mock_sd.InputStream.return_value = MagicMock()
-        buf = RingBuffer(window_size=8000)
-        open_stream(buf, sample_rate=16000)
+        vad_buf = RingBuffer(window_size=8000)
+        srmr_buf = RingBuffer(window_size=48000)
+        open_stream(vad_buf, srmr_buf, sample_rate=16000)
         call_kwargs = mock_sd.InputStream.call_args[1]
         assert call_kwargs["channels"] == 1
 
     @patch("acoustic_mirror.audio.capture.sd")
-    def test_callback_writes_to_buffer(self, mock_sd):
-        buf = RingBuffer(window_size=8000)
+    def test_callback_writes_to_vad_buffer(self, mock_sd):
+        vad_buf = RingBuffer(window_size=8000)
+        srmr_buf = RingBuffer(window_size=48000)
         mock_sd.InputStream.return_value = MagicMock()
 
-        open_stream(buf, sample_rate=16000)
-        # Extract the callback that was passed to InputStream
+        open_stream(vad_buf, srmr_buf, sample_rate=16000)
         call_kwargs = mock_sd.InputStream.call_args[1]
         callback = call_kwargs["callback"]
 
-        # Simulate audio callback
         indata = np.ones((512, 1), dtype=np.float32) * 0.5
         callback(indata, 512, None, None)
 
-        window = buf.get_window()
-        # Last 512 samples should be 0.5
+        window = vad_buf.get_window()
+        assert np.allclose(window[-512:], 0.5)
+
+    @patch("acoustic_mirror.audio.capture.sd")
+    def test_callback_writes_to_srmr_buffer(self, mock_sd):
+        """Issue #2: the same audio must reach both buffers, not just VAD's."""
+        vad_buf = RingBuffer(window_size=8000)
+        srmr_buf = RingBuffer(window_size=48000)
+        mock_sd.InputStream.return_value = MagicMock()
+
+        open_stream(vad_buf, srmr_buf, sample_rate=16000)
+        call_kwargs = mock_sd.InputStream.call_args[1]
+        callback = call_kwargs["callback"]
+
+        indata = np.ones((512, 1), dtype=np.float32) * 0.5
+        callback(indata, 512, None, None)
+
+        window = srmr_buf.get_window()
         assert np.allclose(window[-512:], 0.5)
 
     @patch("acoustic_mirror.audio.capture.sd")

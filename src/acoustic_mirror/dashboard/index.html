@@ -173,6 +173,7 @@
 </head>
 <body>
   <h1>Acoustic Speech Monitor</h1>
+  <div style="font-size: 0.8rem; margin: -1rem 0 1.5rem;"><a id="nav-link" href="diagnose.html" style="color: var(--distance-color); text-decoration: none;">マイク診断（録音して一括解析）→</a></div>
 
   <div class="grid">
     <!-- Intelligibility Ring -->
@@ -277,7 +278,7 @@ function updateRoomProfile(data) {
   const rp = data.room_profile;
   document.getElementById('rt60').textContent = rp.rt60.toFixed(2);
   document.getElementById('noise-floor').textContent = rp.noise_floor_db.toFixed(1);
-  document.getElementById('drr').textContent = rp.drr_db.toFixed(1);
+  document.getElementById('drr').textContent = rp.early_to_late_ratio_db.toFixed(1);
   document.getElementById('srmr-target').textContent = rp.srmr_target.toFixed(1);
   document.getElementById('room-type').textContent = rp.room_type;
 }
@@ -321,10 +322,28 @@ function updateHaptic(data) {
 }
 
 // WebSocket connection
+//
+// The page cannot know which port the broadcaster ended up on, so it asks
+// the server that served it (GET /api/config). ?ws_port= still wins, for
+// pointing one page at another instance; the 8765 literal is only what is
+// left if both are unavailable.
 let ws;
-function connect() {
-  const wsPort = new URLSearchParams(window.location.search).get('ws_port') || '8765';
-  ws = new WebSocket(`ws://localhost:${wsPort}`);
+let wsPort = new URLSearchParams(window.location.search).get('ws_port');
+
+async function resolveWsPort() {
+  if (wsPort) return wsPort;
+  try {
+    const res = await fetch('/api/config');
+    const cfg = await res.json();
+    if (cfg.ws_port) wsPort = String(cfg.ws_port);
+  } catch (e) {
+    // server unreachable — fall through to the literal below
+  }
+  return wsPort || '8765';
+}
+
+async function connect() {
+  ws = new WebSocket(`ws://localhost:${await resolveWsPort()}`);
 
   ws.onopen = () => {
     document.getElementById('conn-dot').className = 'conn-dot connected';
@@ -349,6 +368,9 @@ function connect() {
     updateHaptic(data);
   };
 }
+
+// Keep an explicit ?ws_port= override when moving to the other page.
+document.getElementById('nav-link').href = 'diagnose.html' + window.location.search;
 
 connect();
 </script>

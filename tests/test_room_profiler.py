@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from acoustic_mirror.analysis.room_profiler import (
+    _DEFAULT_RT60,
     RoomProfile,
     RoomProfiler,
     RoomType,
@@ -236,29 +237,25 @@ class TestRoomProfiler:
         assert hasattr(profile, "srmr_target")
         assert hasattr(profile, "rt60_confidence")
 
-    def test_update_with_decay_segment(self):
+    def test_reports_what_the_estimator_sets(self):
+        """ADR-0005 moved the pool and the aggregation into
+        RollingRT60Estimator; the profiler now only carries the result."""
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
-        decay = _make_decay(0.3, duration=1.0)
-        profiler.update_rt60(decay)
-        assert abs(profiler.current_profile.rt60 - 0.3) < 0.1
+        profiler.set_rt60(0.3, confidence=0.95)
+        assert abs(profiler.current_profile.rt60 - 0.3) < 1e-6
         assert profiler.current_profile.rt60_confidence > 0.9
 
-    def test_low_confidence_estimate_does_not_update_rt60(self):
-        """ADR-0003: estimates below the confidence gate must not join the
-        median pool — a noisy/ambiguous decay shouldn't move rt60 at all.
-        """
+    def test_an_unmeasured_room_reports_zero_confidence(self):
+        """ADR-0005: classify_room still needs a number, so the profile
+        carries the default — but confidence 0 marks it as not measured,
+        and that is what the dashboard keys off (issue #13)."""
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)
-        before = profiler.current_profile.rt60
-        rng = np.random.default_rng(7)
-        pure_noise = rng.standard_normal(int(0.5 * SAMPLE_RATE)).astype(np.float32)
-        profiler.update_rt60(pure_noise)
-        # Either it was rejected (rt60 unchanged) or it happened to pass
-        # the gate — but if it passed, confidence must reflect that.
-        after_profile = profiler.current_profile
-        if after_profile.rt60 == before:
-            assert after_profile.rt60_confidence == 0.0
-        else:
-            assert after_profile.rt60_confidence >= 0.5
+        profiler.set_rt60(0.42, confidence=0.9)
+
+        profiler.set_rt60(None, confidence=0.9)
+
+        assert profiler.current_profile.rt60 == _DEFAULT_RT60
+        assert profiler.current_profile.rt60_confidence == 0.0
 
     def test_update_noise_floor(self):
         profiler = RoomProfiler(sample_rate=SAMPLE_RATE)

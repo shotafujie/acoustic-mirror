@@ -11,13 +11,13 @@ rather than a direct dB regression, and why the DRR-like measure is named
 continuous speech's next syllable can land in the "late" window).
 """
 
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
 from scipy import stats
 
+_DEFAULT_RT60 = 0.2  # stands in for an unmeasured room (ADR-0005)
 _RT60_MIN = 0.05
 _RT60_MAX = 3.0
 _RT60_CONFIDENCE_MIN = 0.5  # below this R^2, don't trust the fit (ADR-0003)
@@ -229,14 +229,19 @@ class RoomProfiler:
 
     def __init__(self, sample_rate: int = 16000) -> None:
         self._sample_rate = sample_rate
-        self._rt60_estimates: deque[float] = deque(maxlen=5)
-        self._last_rt60_confidence: float = 0.0
+        # Set by the rolling estimator (ADR-0005); None until enough decay
+        # events agree. The pool and the aggregation live there now.
+        self._rt60: float | None = None
+        self._rt60_confidence: float = 0.0
         self._noise_floor_db = -60.0
         self._early_to_late_ratio_db = 10.0  # default: assume close distance
 
     @property
     def current_profile(self) -> RoomProfile:
-        rt60 = float(np.median(self._rt60_estimates)) if self._rt60_estimates else 0.2
+        # classify_room needs a number; _DEFAULT_RT60 stands in while the
+        # room is unmeasured. rt60_confidence is what says which it is —
+        # the dashboard refuses to draw a value at confidence 0 (ADR-0005).
+        rt60 = self._rt60 if self._rt60 is not None else _DEFAULT_RT60
         room_type = classify_room(rt60, self._noise_floor_db)
         return RoomProfile(
             rt60=rt60,
@@ -244,21 +249,18 @@ class RoomProfiler:
             early_to_late_ratio_db=self._early_to_late_ratio_db,
             room_type=room_type,
             srmr_target=room_type.srmr_target,
-            rt60_confidence=self._last_rt60_confidence,
+            rt60_confidence=self._rt60_confidence,
         )
 
-    def update_rt60(self, decay_segment: np.ndarray) -> None:
-        """Add an RT60 estimate from a speech-offset decay segment.
+    def set_rt60(self, rt60: float | None, confidence: float) -> None:
+        """Record the rolling estimator's current view (ADR-0005).
 
-        Estimates below the confidence gate (ADR-0003) are dropped — they
-        don't join the median pool and don't update the reported
-        confidence, so a single bad fit can't silently degrade rt60.
+        None means too few decay events have been observed to name a value —
+        the profile then reports _DEFAULT_RT60 with confidence 0, and the
+        dashboard shows no number rather than a plausible-looking one.
         """
-        estimate = estimate_rt60_from_decay(decay_segment, self._sample_rate)
-        if not estimate.is_valid or estimate.confidence < _RT60_CONFIDENCE_MIN:
-            return
-        self._rt60_estimates.append(estimate.rt60)
-        self._last_rt60_confidence = estimate.confidence
+        self._rt60 = rt60
+        self._rt60_confidence = confidence if rt60 is not None else 0.0
 
     def update_noise_floor(self, noise_floor_db: float) -> None:
         self._noise_floor_db = noise_floor_db

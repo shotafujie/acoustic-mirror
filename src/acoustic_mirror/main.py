@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from acoustic_mirror.analysis.cause_separator import CauseResult, CauseSeparator
+from acoustic_mirror.analysis.rolling_rt60 import RollingRT60Estimator
 from acoustic_mirror.analysis.room_profiler import (
     RoomProfile,
     RoomProfiler,
@@ -122,9 +123,13 @@ class AnalysisPipeline:
         self._room_profiler = RoomProfiler(sample_rate=sample_rate)
         self._srmr_processor = SRMRProcessor(sample_rate=sample_rate)
         self._cause_separator = CauseSeparator()
+        self._rt60_estimator = RollingRT60Estimator(sample_rate=sample_rate)
         self._prev_speech = False
-        self._prev_chunk: np.ndarray | None = None
         self._prev_frame_energies: list[float] = []
+        # Position of the next chunk in the stream, so one decay is adopted
+        # once however many windows it appears in (ADR-0005). Chunks arrive
+        # contiguously; a gap would at worst let one event through twice.
+        self._samples_seen = 0
         # Persist last speech-frame results so non-speech frames don't clear them
         self._last_srmr_score: float | None = None
         self._last_srmr_compute_time: float | None = None
@@ -132,41 +137,6 @@ class AnalysisPipeline:
         self._last_haptic: dict | None = None
         # Recent VAD history feeding the SRMR recompute gate (ADR-0002)
         self._srmr_speech_history: deque[bool] = deque(maxlen=_SRMR_HISTORY_LEN)
-
-    def _find_speech_offset(self, frame_energies: list[float], threshold_db: float) -> int | None:
-        """Find the last speech frame index (frame where energy drops below threshold)."""
-        last_speech = None
-        for i, e in enumerate(frame_energies):
-            if e > threshold_db:
-                last_speech = i
-        return last_speech
-
-    def _extract_decay_segment(self, chunk: np.ndarray, frame_energies: list[float]) -> np.ndarray | None:
-        """Extract the decay tail from a chunk that contains a speech→silence transition."""
-        if not frame_energies:
-            return None
-        threshold = self._speech_detector._noise_floor_db() + self._speech_detector._threshold_db
-        offset_frame = self._find_speech_offset(frame_energies, threshold)
-        if offset_frame is None:
-            return None
-        # Start from the frame after the last speech frame
-        frame_size = self._speech_detector._frame_size
-        start_sample = (offset_frame + 1) * frame_size
-        if start_sample >= len(chunk):
-            return None
-        decay = chunk[start_sample:]
-        # Need at least 100ms of decay (ADR-0003, revised): the decay tail
-        # only ever comes from what's left of a single 500ms chunk after
-        # the last speech frame, so a 300ms floor made this unreachable
-        # for most utterance-end phases (offset_frame would have to fall
-        # in the chunk's first ~6 of 16 frames). 100ms keeps enough frames
-        # for a T20 fit to be attempted; estimate_rt60_from_decay's own
-        # confidence gate (R^2 < 0.5 is dropped by RoomProfiler.update_rt60)
-        # is what actually filters out decay observations too short or
-        # noisy to trust, rather than an arbitrary length cutoff.
-        if len(decay) < int(self._sample_rate * 0.1):
-            return None
-        return decay
 
     def _is_isolated_onset(self, onset_frame: int, frame_energies: list[float], threshold_db: float) -> bool:
         """True if no frame in the ~200ms preceding the onset was above the
@@ -200,12 +170,19 @@ class AnalysisPipeline:
         # Update room profiler noise floor
         self._room_profiler.update_noise_floor(speech_result.noise_floor_db)
 
-        # Detect speech→silence transition for RT60 estimation (Bug 1+2 fix)
-        # Use the PREVIOUS chunk (which contained speech) to find the decay tail
-        if self._prev_speech and not speech_result.is_speech and self._prev_chunk is not None:
-            decay = self._extract_decay_segment(self._prev_chunk, self._prev_frame_energies)
-            if decay is not None:
-                self._room_profiler.update_rt60(decay)
+        # RT60: every decay event in the rolling window, not just the one
+        # that happens to follow a speech→silence transition (ADR-0005).
+        # The tail of a reverberant room keeps that transition from ever
+        # firing, which is what made the old trigger blind in exactly the
+        # rooms worth measuring (issue #13).
+        self._samples_seen += len(chunk)
+        if srmr_window is not None:
+            self._rt60_estimator.push(
+                srmr_window, window_start=self._samples_seen - len(srmr_window)
+            )
+            self._room_profiler.set_rt60(
+                self._rt60_estimator.rt60, self._rt60_estimator.confidence
+            )
 
         # Early-to-late ratio estimation on speech onset (Bug 5 fix; ADR-0003
         # restricts this to isolated onsets — see _is_isolated_onset)
@@ -223,7 +200,6 @@ class AnalysisPipeline:
                 self._room_profiler.update_early_to_late_ratio(ratio)
 
         self._prev_speech = speech_result.is_speech
-        self._prev_chunk = chunk.copy()
         self._prev_frame_energies = speech_result.frame_energies
 
         room_profile = self._room_profiler.current_profile

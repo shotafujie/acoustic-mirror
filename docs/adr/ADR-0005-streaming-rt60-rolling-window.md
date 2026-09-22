@@ -114,7 +114,9 @@ VADの遷移に依存せず、直近N秒のバッファを `find_decay_events`�
    - 重複採用の除外はイベント開始の絶対サンプル位置（10ms解像度）で行う。窓末尾に達しているイベントは採用しない。
 2. `AnalysisPipeline.process` は、`srmr_window` が渡されたとき（＝3秒バッファが埋まっているとき）に推定器へ渡す。`_prev_speech`/`_prev_chunk` による遷移検出と `_extract_decay_segment` は**削除する**。両方残すと同じ減衰が二重に採用される。
 3. `RoomProfiler` は RT60 のプールを自分で持つのをやめ、推定器の結果を受け取る（`update_rt60(decay_segment)` → `set_rt60(value, confidence)`）。`_rt60_estimates` / `_last_rt60_confidence` は推定器側へ移る。
-4. 信頼度は `min(1.0, len(pool) / _MIN_RT60_EVENTS) * median(R²)` とし、3件に満たない間は0になる。
+4. 信頼度は、3件に満たない間は 0、それ以降はプール内のR²の中央値とする。
+
+   （当初この節は `min(1.0, len(pool) / MIN_RT60_EVENTS) * median(R²)` と書いていたが、**3件未満では `rt60` 自体が None を返す**ため第1項は報告時に常に1であり、式として意味を持たない。実装を式に合わせるのではなく、記述の方を実際の振る舞いに合わせた。現行は「1件でも0.99」だったのに対し、新実装は「3件揃うまで0」であり、**値の少なさが信頼度に現れる**という本来の意図は満たされている。）
 5. `dashboard/index.html` は `rt60_confidence == 0` のとき RT60 を `--` と表示する。
 6. early-to-late ratio の孤立立ち上がり検出（`_is_isolated_onset`）と SRMR ゲートは**変更しない**。本ADRはRT60の起動条件だけを対象とする。
 

@@ -78,3 +78,49 @@ def reverberant_utterances(
     y = y / np.max(np.abs(y))
     y = y + 10 ** (noise_db / 20) * np.random.default_rng(99).standard_normal(len(y))
     return y.astype(np.float32)
+
+
+def speech_utterances(
+    dur: float = 7.0,
+    burst: float = 1.5,
+    gap: float = 1.0,
+    sample_rate: int = SAMPLE_RATE,
+    seed: int = 1,
+) -> np.ndarray:
+    """Utterances of speech-like modulated noise separated by pauses.
+
+    `synth_utterances` fills its bursts with white noise, which has no
+    speech envelope for SRMR to measure. ADR-0004's SRMR-gate revision
+    rests on how much the pauses move SRMR, so its bursts have to carry
+    one: each is a `synth_speech` segment.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.zeros(int(sample_rate * dur), dtype=np.float32)
+    t = 0.2
+    while t + burst < dur:
+        a, b = int(t * sample_rate), int((t + burst) * sample_rate)
+        x[a:b] = synth_speech(dur=burst, sample_rate=sample_rate, seed=int(t * 100) + 1)[: b - a]
+        t += burst + gap * rng.uniform(0.9, 1.1)
+    return x
+
+
+def reverberant_speech(
+    rt60: float,
+    dur: float = 7.0,
+    burst: float = 1.5,
+    gap: float = 1.0,
+    noise_db: float = -60.0,
+    sample_rate: int = SAMPLE_RATE,
+    seed: int = 1,
+) -> np.ndarray:
+    """`speech_utterances` in a room of the given RT60, with a noise floor.
+
+    The pause-containing counterpart to `apply_reverb(synth_speech(...))`,
+    which is the same room heard without pauses.
+    """
+    x = speech_utterances(dur=dur, burst=burst, gap=gap, sample_rate=sample_rate, seed=seed)
+    rir = synth_rir(rt60, sample_rate=sample_rate, dur=max(1.0, rt60 * 1.5), seed=seed)
+    y = np.convolve(x, rir)[: len(x)]
+    y = y / np.max(np.abs(y))
+    y = y + 10 ** (noise_db / 20) * np.random.default_rng(99).standard_normal(len(y))
+    return y.astype(np.float32)

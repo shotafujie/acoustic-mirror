@@ -285,3 +285,43 @@ class TestDiagnosePage:
         """#results uses class="grid" (display:grid), which overrides the UA
         [hidden] rule unless restated — found by opening the page in Chrome."""
         assert "[hidden] { display: none !important; }" in self.html
+
+
+class TestBindAndFailure:
+    """Promises S5 / S6 (docs/adr/ADR-0004)."""
+
+    def test_default_bind_is_localhost(self):
+        import inspect
+
+        assert inspect.signature(DashboardServer.__init__).parameters["host"].default == "localhost"
+
+    def test_socket_is_not_bound_to_every_interface(self):
+        server = DashboardServer(port=0)
+        server.start()
+        try:
+            assert server._server.server_address[0] in ("127.0.0.1", "::1")
+        finally:
+            server.stop()
+
+    def test_analysis_failure_is_500_with_json(self, monkeypatch):
+        from acoustic_mirror.dashboard import http_server
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("synthetic analysis failure")
+
+        monkeypatch.setattr(http_server, "diagnose", boom)
+        server = DashboardServer(host="localhost", port=0)
+        server.start()
+        try:
+            req = urllib.request.Request(
+                f"http://localhost:{server.port}/api/diagnose",
+                data=_wav_bytes(np.zeros(16000 * 5)),
+                headers={"Content-Type": "audio/wav"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                urllib.request.urlopen(req, timeout=30)
+            assert exc_info.value.code == 500
+            assert "error" in json.loads(exc_info.value.read())
+        finally:
+            server.stop()

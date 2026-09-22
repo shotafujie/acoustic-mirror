@@ -114,10 +114,40 @@ class TestSRMRAndRoom:
         result = diagnose(reverberant_utterances(0.3, gap=0.2, seed=1), SAMPLE_RATE)
         assert result.srmr_score is not None
 
+    def test_srmr_computed_when_pauses_lower_the_ratio(self):
+        """The pauses RT60 needs must not cost us SRMR (ADR-0004 revision).
+
+        gap=0.7 is the recording protocol the diagnose page asks for. It puts
+        the speech ratio well under the streaming path's 0.7 gate while still
+        holding more than SRMR's 3s window worth of speech.
+        """
+        y = reverberant_utterances(0.3, gap=0.7, seed=1)
+        result = diagnose(y, SAMPLE_RATE)
+        assert result.speech_ratio < 0.7
+        assert result.speech_seconds >= MIN_DURATION_SECONDS
+        assert result.srmr_score is not None
+
+    def test_srmr_skipped_when_speech_shorter_than_srmr_window(self):
+        """Gate on seconds of speech, not on the ratio: pauses long enough to
+        leave under 3s of speech still fail SRMR's premise (ADR-0002)."""
+        y = reverberant_utterances(0.3, gap=1.2, seed=1)
+        result = diagnose(y, SAMPLE_RATE)
+        assert result.speech_seconds < MIN_DURATION_SECONDS
+        assert result.srmr_score is None
+
+    def test_srmr_skipped_when_clip_is_short_despite_high_ratio(self):
+        """A high ratio over a short clip is not enough speech for SRMR."""
+        y = reverberant_utterances(0.3, gap=0.2, seed=1)[: int(3.5 * SAMPLE_RATE)]
+        result = diagnose(y, SAMPLE_RATE)
+        assert result.speech_ratio >= 0.7
+        assert result.speech_seconds < MIN_DURATION_SECONDS
+        assert result.srmr_score is None
+
     def test_srmr_skipped_when_mostly_silent(self):
         rng = np.random.default_rng(0)
         y = (1e-3 * rng.standard_normal(5 * SAMPLE_RATE)).astype(np.float32)
         result = diagnose(y, SAMPLE_RATE)
+        assert result.speech_seconds < MIN_DURATION_SECONDS
         assert result.srmr_score is None
 
     def test_room_classified_from_estimated_rt60(self):

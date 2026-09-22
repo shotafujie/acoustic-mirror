@@ -313,7 +313,7 @@ function render(d) {
   document.getElementById('srmr').textContent = fmt(d.srmr_score, 2);
   const srmrNote = document.getElementById('srmr-note');
   srmrNote.hidden = d.srmr_score !== null;
-  srmrNote.textContent = `発話の割合が少ないため了解度は算出していません（発話率 ${(d.speech_ratio * 100).toFixed(0)}%、70%以上が必要）。`;
+  srmrNote.textContent = `発話が ${d.speech_seconds.toFixed(1)} 秒しかないため了解度は算出していません（3秒以上必要）。録音を長めにして、もう一度試してください。`;
 
   document.getElementById('rt60').textContent = fmt(d.rt60.value, 2, 's');
   document.getElementById('noise-floor').textContent = d.noise_floor_db.toFixed(1) + 'dB';

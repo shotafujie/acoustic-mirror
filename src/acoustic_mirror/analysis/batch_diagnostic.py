@@ -48,9 +48,13 @@ _VAD_FRAME_MS = 30
 _NOISE_FLOOR_PERCENTILE = 10
 _SPEECH_THRESHOLD_DB = 6.0
 _ISOLATION_MS = 200.0  # ADR-0003's isolated-onset gate
-# Same value as main._SRMR_GATE_MIN_SPEECH_RATIO (ADR-0002); not imported
-# because main pulls in audio I/O.
-_SRMR_MIN_SPEECH_RATIO = 0.7
+# SRMR gate. The streaming path gates on a speech *ratio*
+# (main._SRMR_GATE_MIN_SPEECH_RATIO, ADR-0002), but that is a proxy for
+# "enough speech" that only holds because its window is a fixed 3s. Here the
+# clip is variable-length, and the pauses RT60 needs push the ratio under 0.7
+# while several seconds of speech are still present — so gate on the quantity
+# SRMR actually needs, the seconds of speech in the clip (ADR-0004 revision).
+_SRMR_MIN_SPEECH_SECONDS = MIN_DURATION_SECONDS
 
 # RoomProfiler's defaults, used when a metric can't be estimated.
 _DEFAULT_RT60 = 0.2
@@ -62,6 +66,7 @@ class DiagnosticResult:
     duration_seconds: float
     noise_floor_db: float
     speech_ratio: float
+    speech_seconds: float
     rt60: float | None
     rt60_events: list[float]
     rt60_rejected_count: int
@@ -79,6 +84,7 @@ class DiagnosticResult:
             "duration_seconds": round(self.duration_seconds, 2),
             "noise_floor_db": round(self.noise_floor_db, 1),
             "speech_ratio": round(self.speech_ratio, 3),
+            "speech_seconds": round(self.speech_seconds, 2),
             "rt60": {
                 "value": None if self.rt60 is None else round(self.rt60, 3),
                 "events": [round(v, 3) for v in self.rt60_events],
@@ -218,6 +224,7 @@ def diagnose(signal: np.ndarray, sample_rate: int) -> DiagnosticResult:
         defaulted.append("early_to_late_ratio")
 
     speech_ratio = float(is_speech.mean()) if len(is_speech) else 0.0
+    speech_seconds = float(is_speech.sum()) * vad_frame / sr
 
     room_rt60 = rt60 if rt60 is not None else _DEFAULT_RT60
     room_type = classify_room(room_rt60, noise_floor_db)
@@ -231,7 +238,7 @@ def diagnose(signal: np.ndarray, sample_rate: int) -> DiagnosticResult:
 
     srmr_score = None
     cause = None
-    if speech_ratio >= _SRMR_MIN_SPEECH_RATIO:
+    if speech_seconds >= _SRMR_MIN_SPEECH_SECONDS:
         srmr = SRMRProcessor(sample_rate=sr).process(y, is_speech=True)
         if srmr.is_valid:
             srmr_score = srmr.srmr_score
@@ -242,6 +249,7 @@ def diagnose(signal: np.ndarray, sample_rate: int) -> DiagnosticResult:
         duration_seconds=duration,
         noise_floor_db=noise_floor_db,
         speech_ratio=speech_ratio,
+        speech_seconds=speech_seconds,
         rt60=rt60,
         rt60_events=rt60_events,
         rt60_rejected_count=rejected,

@@ -5,6 +5,7 @@ import pytest
 
 from tests.synth import reverberant_utterances
 
+from acoustic_mirror.analysis.rolling_rt60 import RollingRT60Estimator
 from acoustic_mirror.main import AnalysisPipeline, AnalysisResult, should_recompute_srmr
 
 SAMPLE_RATE = 16000
@@ -183,6 +184,33 @@ class TestAnalysisPipeline:
         profile = pipeline._room_profiler.current_profile
         assert abs(profile.rt60 - 0.6) / 0.6 <= 0.15
         assert profile.rt60_confidence > 0.5
+
+    def test_the_pipeline_positions_the_window_correctly_in_the_stream(self):
+        """The estimator deduplicates by an event's absolute position, so the
+        `window_start` the pipeline computes has to be right. Nothing was
+        checking the arithmetic: the independent verification of ADR-0005
+        forced it to a constant 0 and all 312 tests still passed.
+
+        Driving the estimator directly with known offsets gives the count
+        the pipeline must match; a wrong offset re-adopts decays it has
+        already seen.
+        """
+        clip = reverberant_utterances(0.6, gap=1.2, seed=1)
+        window_samples = 3 * SAMPLE_RATE
+
+        direct = RollingRT60Estimator(sample_rate=SAMPLE_RATE)
+        pipeline = AnalysisPipeline(sample_rate=SAMPLE_RATE)
+        for end in range(8000, len(clip) + 1, 8000):
+            start = max(0, end - window_samples)
+            window = (
+                clip[start:end].astype(np.float32) if end - start == window_samples else None
+            )
+            if window is not None:
+                direct.push(window, window_start=start)
+            pipeline.process(clip[end - 8000 : end].astype(np.float32), srmr_window=window)
+
+        assert pipeline._rt60_estimator.event_count == direct.event_count
+        assert direct.event_count > 0, "nothing was adopted; the test is vacuous"
 
     def test_rt60_does_not_depend_on_where_the_utterance_ends_in_a_chunk(self):
         """Successor to the reachability guard from ADR-0003's advisor pass.

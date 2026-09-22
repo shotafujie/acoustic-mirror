@@ -36,20 +36,31 @@ class RollingRT60Estimator:
         self._estimates: deque[float] = deque(maxlen=_POOL_SIZE)
         self._r_squared: deque[float] = deque(maxlen=_POOL_SIZE)
         self._seen: set[int] = set()
+        self._key_size = sample_rate * _DEDUPE_RESOLUTION_MS // 1000
         self._rejected = 0
 
     def push(self, window: np.ndarray, window_start: int) -> None:
         """Offer the latest window. `window_start` is its first sample's
         position in the stream, which is what keeps one decay from being
         counted once per window it appears in."""
+        # A decay that ended before this window began can never be offered
+        # again, so its key is dead weight — without this the set grows for
+        # as long as the session runs.
+        oldest = window_start // self._key_size - 1
+        self._seen = {k for k in self._seen if k >= oldest}
+
         for start, end in find_decay_events(window, self._sample_rate):
             if end >= len(window):
                 # Still falling at the edge: fitting it now would measure a
                 # fraction of the decay and read short. It will be complete
                 # in a later window.
                 continue
-            key = (window_start + start) // (self._sample_rate * _DEDUPE_RESOLUTION_MS // 1000)
-            if key in self._seen:
+            key = (window_start + start) // self._key_size
+            # The origin is found against percentiles recomputed per window,
+            # so the same decay can land one frame apart in two windows. An
+            # exact key would then adopt it twice; events are at least 100ms
+            # long, so neighbouring keys cannot be different decays.
+            if any(k in self._seen for k in (key - 1, key, key + 1)):
                 continue
             self._seen.add(key)
             estimate = estimate_rt60_from_decay(window[start:end], self._sample_rate)

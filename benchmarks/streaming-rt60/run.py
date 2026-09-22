@@ -24,6 +24,7 @@ SR = 16000
 CHUNK = SR // 2
 WINDOW = 3 * SR
 BUDGET_MS = 500.0
+CEILING = 0.10  # 10% of the chunk; measured worst case is ~0.35%
 
 
 def measure(rt60: float, gap: float, repeats: int = 5) -> list[float]:
@@ -53,8 +54,15 @@ def main() -> None:
             mx = max(samples)
             worst = max(worst, mx)
             print(f"{rt60:>5.1f} {gap:>5.1f} | {mean:>8.2f} {p95:>8.2f} {mx:>8.2f} {mx / BUDGET_MS * 100:>10.2f}%")
-    print(f"\nworst case {worst:.2f}ms of a {BUDGET_MS:.0f}ms chunk "
-          f"({worst / BUDGET_MS * 100:.2f}%)")
+    share = worst / BUDGET_MS
+    print(f"\nworst case {worst:.2f}ms of a {BUDGET_MS:.0f}ms chunk ({share * 100:.2f}%)")
+
+    # A number nobody checks is not a guard. ADR-0005's falsification
+    # condition is stated against the real-time budget, so the run fails
+    # loudly if the estimate stops fitting inside it with room to spare.
+    if share > CEILING:
+        print(f"OVER BUDGET: {share * 100:.2f}% exceeds the {CEILING * 100:.0f}% ceiling")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
